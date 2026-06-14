@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, City, CityEvent, Membership, Player, War, utcnow
+from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, Membership, Player, War, utcnow
 
 CITY_PREFIXES = [
     "Неоновый", "Шумный", "Подпольный", "Кибер", "Бешеный", "Сонный", "Золотой", "Пиксельный",
@@ -1175,6 +1175,161 @@ def weekly_summary(db: Session, city: City) -> dict[str, Any]:
         "trophies": get_city_trophies(city),
     }
 
+
+def _alliance_pair(left_id: int, right_id: int) -> tuple[int, int]:
+    return (left_id, right_id) if left_id < right_id else (right_id, left_id)
+
+
+def register_city_referral(db: Session, invited_city: City, referrer_code: str | None) -> tuple[bool, str | None]:
+    """Reward the city whose deep-link created a new group city.
+
+    Telegram startgroup links pass a short payload into /start. We keep the
+    reward one-time per invited city so people cannot farm by restarting bot.
+    """
+    code = (referrer_code or "").strip().upper().removeprefix("CITY_")
+    if not code:
+        return False, None
+    referrer = db.scalar(select(City).where(City.invite_code == code))
+    if not referrer:
+        return False, "Реф-код города не найден. Сарафанка потеряла паспорт."
+    if referrer.id == invited_city.id:
+        return False, None
+    existing = db.scalar(select(CityReferral).where(CityReferral.invited_city_id == invited_city.id))
+    if existing:
+        return False, None
+
+    referral = CityReferral(
+        referrer_city_id=referrer.id,
+        invited_city_id=invited_city.id,
+        invite_code=code,
+        reward_given=1,
+    )
+    db.add(referral)
+    referrer.treasury += 120
+    referrer.xp += 80
+    invited_city.treasury += 35
+    invited_city.xp += 25
+    trophy = award_trophy(referrer, "🌱 Основатель нового района")
+    maybe_level_up(referrer)
+    maybe_level_up(invited_city)
+    log(db, referrer.id, None, "city_referral", f"По ссылке города добавили новый чат: {invited_city.name}. Награда: +120 в казну, трофей {trophy}.")
+    log(db, invited_city.id, None, "city_referral_joined", f"Город пришёл по ссылке {referrer.name}. Бонус старта: +35 в казну.")
+    db.flush()
+    return True, f"Город пришёл по ссылке <b>{referrer.name}</b>. Бонус старта: +35 в казну. {referrer.name} получил трофей и +120 монет."
+
+
+def create_city_alliance(db: Session, city: City, target_code: str) -> tuple[bool, str, City | None]:
+    code = (target_code or "").strip().upper().removeprefix("CITY_")
+    target = db.scalar(select(City).where(City.invite_code == code))
+    if not target:
+        return False, "Город с таким кодом не найден.", None
+    if target.id == city.id:
+        return False, "Союз с самим собой — это уже одиночество с документами.", target
+    left_id, right_id = _alliance_pair(city.id, target.id)
+    existing = db.scalar(
+        select(CityAlliance).where(
+            CityAlliance.city_a_id == left_id,
+            CityAlliance.city_b_id == right_id,
+            CityAlliance.status == AllianceStatus.ACTIVE.value,
+        )
+    )
+    if existing:
+        return False, f"Союз с городом {target.name} уже действует.", target
+
+    alliance = CityAlliance(city_a_id=left_id, city_b_id=right_id, status=AllianceStatus.ACTIVE.value)
+    db.add(alliance)
+    city.treasury += 35
+    city.xp += 45
+    target.treasury += 35
+    target.xp += 45
+    award_trophy(city, "🤝 Союзный договор")
+    award_trophy(target, "🤝 Союзный договор")
+    maybe_level_up(city)
+    maybe_level_up(target)
+    log(db, city.id, None, "alliance_created", f"Заключён союз с городом {target.name}.")
+    log(db, target.id, None, "alliance_created", f"Заключён союз с городом {city.name}.")
+    db.flush()
+    return True, f"{city.name} и {target.name} заключили союз. Оба города получили +35 в казну, +45 XP и трофей.", target
+
+
+def city_alliances(db: Session, city: City, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(CityAlliance)
+        .where(
+            CityAlliance.status == AllianceStatus.ACTIVE.value,
+            (CityAlliance.city_a_id == city.id) | (CityAlliance.city_b_id == city.id),
+        )
+        .order_by(desc(CityAlliance.created_at))
+        .limit(limit)
+    ).all()
+    result: list[dict[str, Any]] = []
+    for alliance in rows:
+        other_id = alliance.city_b_id if alliance.city_a_id == city.id else alliance.city_a_id
+        other = db.get(City, other_id)
+        if other:
+            result.append({
+                "id": alliance.id,
+                "name": other.name,
+                "title": other.title,
+                "rank": city_rank(other),
+                "level": other.level,
+                "invite_code": other.invite_code,
+                "created_at": alliance.created_at.isoformat(),
+            })
+    return result
+
+
+def city_referral_count(db: Session, city_id: int) -> int:
+    return db.scalar(select(func.count(CityReferral.id)).where(CityReferral.referrer_city_id == city_id)) or 0
+
+
+def city_alliance_count(db: Session, city_id: int) -> int:
+    return db.scalar(
+        select(func.count(CityAlliance.id)).where(
+            CityAlliance.status == AllianceStatus.ACTIVE.value,
+            (CityAlliance.city_a_id == city_id) | (CityAlliance.city_b_id == city_id),
+        )
+    ) or 0
+
+
+def admin_stats(db: Session) -> dict[str, Any]:
+    since_day = utcnow() - timedelta(days=1)
+    cities_total = db.scalar(select(func.count(City.id))) or 0
+    players_total = db.scalar(select(func.count(Player.id))) or 0
+    memberships_total = db.scalar(select(func.count(Membership.id))) or 0
+    active_players_day = db.scalar(
+        select(func.count(func.distinct(ActionLog.player_id))).where(ActionLog.player_id.is_not(None), ActionLog.created_at >= since_day)
+    ) or 0
+    actions_day = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.created_at >= since_day)) or 0
+    new_cities_day = db.scalar(select(func.count(City.id)).where(City.created_at >= since_day)) or 0
+    referrals_total = db.scalar(select(func.count(CityReferral.id))) or 0
+    alliances_total = db.scalar(select(func.count(CityAlliance.id)).where(CityAlliance.status == AllianceStatus.ACTIVE.value)) or 0
+    raids_active = db.scalar(select(func.count(War.id)).where(War.status == "active")) or 0
+    raids_finished = db.scalar(select(func.count(War.id)).where(War.status == "finished")) or 0
+    action_count = func.count(ActionLog.id)
+    top_action_row = db.execute(
+        select(ActionLog.action, action_count.label("n"))
+        .where(ActionLog.created_at >= since_day)
+        .group_by(ActionLog.action)
+        .order_by(desc(action_count))
+        .limit(1)
+    ).first()
+    top_city = top_cities(db, limit=1)
+    return {
+        "cities_total": int(cities_total),
+        "players_total": int(players_total),
+        "memberships_total": int(memberships_total),
+        "active_players_day": int(active_players_day),
+        "actions_day": int(actions_day),
+        "new_cities_day": int(new_cities_day),
+        "referrals_total": int(referrals_total),
+        "alliances_total": int(alliances_total),
+        "raids_active": int(raids_active),
+        "raids_finished": int(raids_finished),
+        "top_action": {"action": top_action_row[0], "count": int(top_action_row[1])} if top_action_row else None,
+        "top_city": top_city[0] if top_city else None,
+    }
+
 def top_cities(db: Session, limit: int = 10) -> list[dict[str, Any]]:
     population_subquery = (
         select(Membership.city_id, func.count(Membership.id).label("population"))
@@ -1199,6 +1354,9 @@ def top_cities(db: Session, limit: int = 10) -> list[dict[str, Any]]:
             "rank": city_rank(city),
             "season": int(city.season_number or 1),
             "invite_code": city.invite_code,
+            "trophies_count": len(get_city_trophies(city)),
+            "alliances_count": city_alliance_count(db, city.id),
+            "referrals_count": city_referral_count(db, city.id),
         }
         for city, population in rows
     ]
@@ -1273,6 +1431,8 @@ def city_payload(db: Session, city: City) -> dict[str, Any]:
         "invite_code": city.invite_code,
         "buildings": building_names,
         "trophies": get_city_trophies(city),
+        "alliances_count": city_alliance_count(db, city.id),
+        "referrals_count": city_referral_count(db, city.id),
         "season": season_payload(city),
         "shop": get_city_shop(city),
         "created_at": city.created_at.isoformat(),

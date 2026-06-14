@@ -64,7 +64,7 @@ RUN_BOT_POLLING=true
 ENABLE_AUTO_EVENTS=true
 AUTO_EVENT_INTERVAL_MINUTES=30
 AUTO_EVENT_MIN_POPULATION=1
-ADMIN_IDS=
+ADMIN_IDS=123456789
 APP_SECRET=любой_длинный_секрет_32_символа_или_больше
 DB_POOL_SIZE=5
 DB_MAX_OVERFLOW=10
@@ -165,7 +165,11 @@ resolve - завершить событие
 top - рейтинг
 raid - вызвать город на рейд
 raids - входящие рейды
+ally - заключить союз
+alliances - союзы города
+globaltop - глобальный топ городов
 officials - должности города
 weekly - итоги недели
+admin_stats - статистика проекта, только ADMIN_IDS
 help - помощь
 ```

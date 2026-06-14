@@ -23,6 +23,11 @@ class WarStatus(StrEnum):
     FINISHED = "finished"
 
 
+class AllianceStatus(StrEnum):
+    ACTIVE = "active"
+    BROKEN = "broken"
+
+
 class City(Base):
     __tablename__ = "cities"
 
@@ -129,6 +134,36 @@ class War(Base):
     status: Mapped[str] = mapped_column(String(20), default=WarStatus.ACTIVE.value, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CityAlliance(Base):
+    __tablename__ = "city_alliances"
+    __table_args__ = (
+        UniqueConstraint("city_a_id", "city_b_id", name="uq_city_alliance_pair"),
+        Index("ix_city_alliances_city_a_status", "city_a_id", "status"),
+        Index("ix_city_alliances_city_b_status", "city_b_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city_a_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
+    city_b_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=AllianceStatus.ACTIVE.value, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class CityReferral(Base):
+    __tablename__ = "city_referrals"
+    __table_args__ = (
+        UniqueConstraint("invited_city_id", name="uq_city_referral_invited_city"),
+        Index("ix_city_referrals_referrer", "referrer_city_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    referrer_city_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
+    invited_city_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
+    invite_code: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    reward_given: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class ActionLog(Base):

@@ -19,6 +19,7 @@ from app.game import (
     SHOP_ITEMS,
     APPOINTABLE_TITLES,
     active_incoming_raids,
+    admin_stats,
     appoint_city_official,
     buy_shop_item,
     build_city_building,
@@ -55,6 +56,9 @@ from app.game import (
     vote_event,
     weekly_summary,
     city_officials,
+    city_alliances,
+    create_city_alliance,
+    register_city_referral,
     work,
 )
 from app.models import City
@@ -148,50 +152,70 @@ def city_panel_keyboard(is_member: bool = True, is_founder: bool = False) -> Inl
         rows.append([InlineKeyboardButton(text="✅ Вступить", callback_data="cc:join")])
     rows.extend([
         [
-            InlineKeyboardButton(text="💼 Работать", callback_data="cc:work"),
-            InlineKeyboardButton(text="🎁 Награда", callback_data="cc:daily"),
-        ],
-        [
             InlineKeyboardButton(text="🏙 Город", callback_data="cc:city"),
-            InlineKeyboardButton(text="👤 Профиль", callback_data="cc:profile"),
+            InlineKeyboardButton(text="👤 Я", callback_data="cc:profile"),
         ],
         [
-            InlineKeyboardButton(text="🎯 Квест", callback_data="cc:quest"),
-            InlineKeyboardButton(text="🎲 Событие", callback_data="cc:event"),
+            InlineKeyboardButton(text="🎲 Движ", callback_data="cc:move"),
+            InlineKeyboardButton(text="⚔️ Война", callback_data="cc:war"),
         ],
         [
-            InlineKeyboardButton(text="🛒 Магазин", callback_data="cc:shop"),
-            InlineKeyboardButton(text="⚔️ Рейд", callback_data="cc:raid_help"),
-        ],
-        [
-            InlineKeyboardButton(text="🏆 Топ", callback_data="cc:top"),
+            InlineKeyboardButton(text="🌍 Топ городов", callback_data="cc:global_top"),
             InlineKeyboardButton(text="⚙️ Ещё", callback_data="cc:more"),
         ],
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def move_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💼 Работать", callback_data="cc:work"),
+            InlineKeyboardButton(text="🎁 Награда", callback_data="cc:daily"),
+        ],
+        [
+            InlineKeyboardButton(text="🎯 Квест", callback_data="cc:quest"),
+            InlineKeyboardButton(text="🎲 Событие", callback_data="cc:event"),
+        ],
+        [
+            InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
+            InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"),
+        ],
+        [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
+    ])
+
+
+def war_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⚔️ Рейд", callback_data="cc:raid_help"),
+            InlineKeyboardButton(text="⚔️ Входящие", callback_data="cc:raids"),
+        ],
+        [
+            InlineKeyboardButton(text="🤝 Союзы", callback_data="cc:alliances"),
+            InlineKeyboardButton(text="📣 Позвать", callback_data="cc:invite_bot"),
+        ],
+        [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
+    ])
+
+
 def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(text="🏗 Постройки", callback_data="cc:buildings"),
+            InlineKeyboardButton(text="🛒 Магазин", callback_data="cc:shop"),
+        ],
+        [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
-        ],
-        [
-            InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"),
-            InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
-        ],
-        [
             InlineKeyboardButton(text="🗳 Выборы", callback_data="cc:election"),
-            InlineKeyboardButton(text="📆 Сезон", callback_data="cc:season"),
         ],
         [
             InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
-            InlineKeyboardButton(text="📜 Логи", callback_data="cc:logs"),
+            InlineKeyboardButton(text="📆 Сезон", callback_data="cc:season"),
         ],
         [
-            InlineKeyboardButton(text="📣 Позвать бота", callback_data="cc:invite_bot"),
-            InlineKeyboardButton(text="🌍 Топ городов", callback_data="cc:global_top"),
+            InlineKeyboardButton(text="📆 Итоги", callback_data="cc:weekly"),
+            InlineKeyboardButton(text="📜 Логи", callback_data="cc:logs"),
         ],
     ]
     if not is_founder:
@@ -391,7 +415,51 @@ def render_weekly_summary(payload: dict[str, Any]) -> str:
 
 
 def render_more_menu() -> str:
-    return "⚙️ <b>Ещё</b>\n\nДополнительные действия города."
+    return "⚙️ <b>Ещё</b>\n\nПостройки, суды, должности, сезон и логи. Всё, чем район обычно ломает себе жизнь."
+
+
+def render_move_menu() -> str:
+    return "🎲 <b>Движ</b>\n\nРабота, награда, квесты, события и драма."
+
+
+def render_war_menu() -> str:
+    return "⚔️ <b>Война и связи</b>\n\nРейды, союзы и ссылка, чтобы притащить Чатоград в другие чаты."
+
+
+def render_alliances(items: list[dict[str, Any]], city_code: str) -> str:
+    lines = ["🤝 <b>Союзы города</b>", "", f"Код вашего города: <code>{h(city_code)}</code>"]
+    if not items:
+        lines.append("\nСоюзов пока нет. Район одинок, но держится красиво.")
+        lines.append("\nСоздать союз: <code>/ally CXXXXXXX</code>")
+        return "\n".join(lines)
+    lines.append("")
+    for item in items:
+        lines.append(f"• <b>{h(item['name'])}</b> · {h(item['rank'])} · ур. {item['level']} · код <code>{h(item['invite_code'])}</code>")
+    lines.append("\nСоздать новый союз: <code>/ally CXXXXXXX</code>")
+    return "\n".join(lines)
+
+
+def render_admin_stats(payload: dict[str, Any]) -> str:
+    top_action = payload.get("top_action") or {}
+    top_city = payload.get("top_city") or {}
+    lines = [
+        "🛠 <b>Админ-статистика Чатограда</b>",
+        "",
+        f"Городов: <b>{payload['cities_total']}</b>",
+        f"Игроков: <b>{payload['players_total']}</b>",
+        f"Жителей в городах: <b>{payload['memberships_total']}</b>",
+        f"Активных игроков за 24ч: <b>{payload['active_players_day']}</b>",
+        f"Действий за 24ч: <b>{payload['actions_day']}</b>",
+        f"Новых городов за 24ч: <b>{payload['new_cities_day']}</b>",
+        f"Реферальных городов: <b>{payload['referrals_total']}</b>",
+        f"Союзов: <b>{payload['alliances_total']}</b>",
+        f"Рейдов: активных <b>{payload['raids_active']}</b> · завершённых <b>{payload['raids_finished']}</b>",
+    ]
+    if top_action:
+        lines.append(f"Самое частое действие за 24ч: <b>{h(top_action.get('action'))}</b> · {top_action.get('count')}")
+    if top_city:
+        lines.append(f"Топ-город: <b>{h(top_city.get('name'))}</b> · ур. {top_city.get('level')} · жители {top_city.get('population')}")
+    return "\n".join(lines)
 
 
 def render_daily(payload: dict[str, Any], text: str | None = None) -> str:
@@ -512,8 +580,13 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
         user = message.from_user
         owner = await is_user_chat_owner(message.bot, message.chat.id, user.id if user else None)
         founder_line = ""
+        referral_line = ""
         with session_scope() as db:
             city, created = get_or_create_city(db, message.chat.id, message.chat.title)
+            if args.startswith("city_") or args.startswith("C"):
+                _ok_ref, ref_text = register_city_referral(db, city, args)
+                if ref_text:
+                    referral_line = "\n" + ref_text
             is_founder = False
             if is_human_user(user):
                 player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
@@ -526,7 +599,7 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
         await send_game_message(message, 
             f"🏙 <b>{BRAND} активирован.</b>\n\n"
             f"Город <b>{h(payload['name'])}</b> {status}.\n"
-            f"Уровень: <b>{payload['level']}</b> · Казна: <b>{payload['treasury']}</b> · Жители: <b>{payload['population']}</b>{founder_line}\n"
+            f"Уровень: <b>{payload['level']}</b> · Казна: <b>{payload['treasury']}</b> · Жители: <b>{payload['population']}</b>{founder_line}{referral_line}\n"
             f"Код рейдов: <code>{h(payload['invite_code'])}</code>",
             reply_markup=city_panel_keyboard(is_member=True, is_founder=is_founder),
         )
@@ -559,7 +632,7 @@ async def cmd_help(message: Message) -> None:
         await send_game_message(message, 
             f"🧭 <b>{BRAND}</b>\n\n"
             "Панель города открыта.",
-            reply_markup=back_keyboard(),
+            reply_markup=city_panel_keyboard(),
         )
     else:
         await send_game_message(message, 
@@ -681,6 +754,11 @@ async def cmd_top(message: Message) -> None:
     await send_global_top(message)
 
 
+@router.message(Command("globaltop"))
+async def cmd_globaltop(message: Message) -> None:
+    await send_global_top(message)
+
+
 @router.message(Command("raid"))
 async def cmd_raid(message: Message, command: CommandObject) -> None:
     if not is_group(message):
@@ -695,6 +773,31 @@ async def cmd_raid(message: Message, command: CommandObject) -> None:
         )
         return
     await perform_raid_challenge(message, code)
+
+
+@router.message(Command("ally"))
+async def cmd_ally(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Союзы доступны в группе.")
+        return
+    code = (command.args or "").strip().upper()
+    if not code:
+        await perform_alliances(message)
+        return
+    await perform_create_alliance(message, code)
+
+
+@router.message(Command("alliances"))
+async def cmd_alliances(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Союзы доступны в группе.")
+        return
+    await perform_alliances(message)
+
+
+@router.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message) -> None:
+    await perform_admin_stats(message)
 
 
 @router.message(Command("raids"))
@@ -1039,12 +1142,13 @@ async def send_global_top(message: Message) -> None:
     if not cities:
         await send_game_message(message, "Городов пока нет.")
         return
-    lines = [f"🌍 <b>{BRAND}: топ городов</b>"]
+    lines = [f"🌍 <b>{BRAND}: топ городов</b>", ""]
     for index, item in enumerate(cities, start=1):
         lines.append(
-            f"{index}. <b>{h(item['name'])}</b> · ур. {item['level']} · казна {item['treasury']} · жители {item['population']}"
+            f"{index}. <b>{h(item['name'])}</b> · {h(item['rank'])} · ур. {item['level']} · жители {item['population']} · "
+            f"трофеи {item.get('trophies_count', 0)} · союзы {item.get('alliances_count', 0)} · привёл {item.get('referrals_count', 0)}"
         )
-    await send_game_message(message, "\n".join(lines))
+    await send_game_message(message, "\n".join(lines), reply_markup=back_keyboard() if is_group(message) else None)
 
 
 async def perform_logs(message: Message) -> None:
@@ -1134,6 +1238,35 @@ async def perform_raid_accept(message: Message, war_id: int) -> None:
         f"Казна: <b>{payload['treasury']}</b> · Уровень: <b>{payload['level']}</b>",
         reply_markup=back_keyboard(),
     )
+
+
+async def perform_alliances(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        items = city_alliances(db, city)
+        code = city.invite_code
+    await send_game_message(message, render_alliances(items, code), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🤝 Создать союз", callback_data="cc:ally_help")], [InlineKeyboardButton(text="⚔️ Назад", callback_data="cc:war")]]))
+
+
+async def perform_create_alliance(message: Message, code: str) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        ok, text, _target = create_city_alliance(db, city, code)
+        items = city_alliances(db, city)
+        city_code = city.invite_code
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_alliances(items, city_code), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚔️ Назад", callback_data="cc:war")], [InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")]]))
+
+
+async def perform_admin_stats(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else None
+    settings = get_settings()
+    if user_id not in settings.admin_ids:
+        await send_game_message(message, "Админка закрыта.")
+        return
+    with session_scope() as db:
+        payload = admin_stats(db)
+    await send_game_message(message, render_admin_stats(payload))
 
 
 async def perform_officials(message: Message) -> None:
@@ -1259,9 +1392,13 @@ async def cb_invite_bot(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await delete_callback_message(callback)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, callback.message.chat.id, callback.message.chat.title)
+        code = city.invite_code
     await send_game_message(callback.message, 
         "📣 <b>Позвать Чатоград</b>\n\n"
-        f"Добавление в другой чат: https://t.me/{h(bot_username)}?startgroup=true",
+        "Если по ссылке добавят бота в другой чат, ваш город получит награду.\n\n"
+        f"https://t.me/{h(bot_username)}?startgroup=city_{h(code)}",
         reply_markup=back_keyboard(),
     )
 
@@ -1447,6 +1584,46 @@ async def cb_weekly(callback: CallbackQuery) -> None:
     await delete_callback_message(callback)
     await perform_weekly(callback.message)  # type: ignore[arg-type]
 
+
+
+@router.callback_query(F.data == "cc:move")
+async def cb_move(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Это работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await send_game_message(callback.message, render_move_menu(), reply_markup=move_keyboard())  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:war")
+async def cb_war(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Это работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await send_game_message(callback.message, render_war_menu(), reply_markup=war_keyboard())  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:alliances")
+async def cb_alliances(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Союзы работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_alliances(callback.message)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:ally_help")
+async def cb_ally_help(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Союзы работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await send_game_message(callback.message, "🤝 <b>Создать союз</b>\n\nОтправь команду: <code>/ally CXXXXXXX</code>", reply_markup=war_keyboard())  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data == "cc:more")
