@@ -13,6 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.ai import generate_ai_text
 from app.db import session_scope
 from app.game import (
     BUILDINGS,
@@ -90,6 +91,13 @@ from app.game import (
     set_city_activity_mode,
     should_send_daily_summary,
     work,
+    ai_context_payload,
+    ai_usage_allowed,
+    register_ai_usage,
+    secret_role_payload,
+    mission_payload,
+    owner_stats_payload,
+    stars_products_payload,
 )
 from app.models import City
 
@@ -277,7 +285,15 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="👑 Кабинет", callback_data="cc:founder_panel"),
+            InlineKeyboardButton(text="🎯 Миссия", callback_data="cc:mission"),
+        ],
+        [
+            InlineKeyboardButton(text="🕵️ Тайная роль", callback_data="cc:secret_role"),
             InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape"),
+        ],
+        [
+            InlineKeyboardButton(text="⭐ Stars", callback_data="cc:stars"),
+            InlineKeyboardButton(text="📣 Поделиться", callback_data="cc:share"),
         ],
         [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
@@ -474,7 +490,9 @@ def render_profile(payload: dict[str, Any]) -> str:
         f"Уровень: <b>{payload['level']}</b> · XP: <b>{payload['xp_in_level']}</b>/<b>{payload['xp_for_next']}</b>\n"
         f"Монеты: <b>{payload['coins']}</b> · Серия: <b>{payload['daily_streak']}</b> дней · Награда: <b>{daily}</b>\n"
         f"Влияние: <b>{payload['influence']}</b> · Репутация: <b>{payload['reputation']}</b>\n"
-        f"Судимости: <b>{payload['convictions']}</b> · Достижения: <b>{payload.get('achievements_count', 0)}</b>"
+        f"Судимости: <b>{payload['convictions']}</b> · Достижения: <b>{payload.get('achievements_count', 0)}</b>\n"
+        f"Тайная роль: <b>{h(payload.get('secret_role', 'нет'))}</b>\n"
+        f"Миссия: <b>{h((payload.get('mission') or {}).get('name', 'нет'))}</b>"
     )
 
 
@@ -723,7 +741,11 @@ def founder_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
             InlineKeyboardButton(text="📣 Промо", callback_data="cc:promo"),
         ],
-        [InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary")],
+        [
+            InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary"),
+            InlineKeyboardButton(text="📈 Статистика", callback_data="cc:owner_stats"),
+        ],
+        [InlineKeyboardButton(text="🤖 AI-статус", callback_data="cc:ai_status")],
         [
             InlineKeyboardButton(text="🔕 Тихо", callback_data="cc:mode:quiet"),
             InlineKeyboardButton(text="⚖️ Норм", callback_data="cc:mode:normal"),
@@ -802,6 +824,67 @@ def render_day_summary(payload: dict[str, Any]) -> str:
             lines.append(f"• {h(item['text'])}")
     return "\n".join(lines)
 
+
+
+
+def render_secret_role(payload: dict[str, Any]) -> str:
+    fresh = "\n\nНовая роль закреплена за тобой." if payload.get("created") else ""
+    return f"🕵️ <b>Тайная роль</b>\n\n{h(payload['name'])}\n{h(payload['text'])}{fresh}"
+
+
+def render_mission(payload: dict[str, Any]) -> str:
+    if not payload.get("active"):
+        return f"🎯 <b>Личная миссия</b>\n\n{h(payload.get('text', 'Миссий пока нет.'))}"
+    status = "✅ выполнена" if payload.get("completed") else f"{payload.get('progress', 0)}/{payload.get('need', 1)}"
+    reward = payload.get("reward") or {}
+    reward_text = payload.get("reward_text") or ""
+    return (
+        f"🎯 <b>Личная миссия</b>\n\n"
+        f"{h(payload['name'])}\n"
+        f"Задача: {h(payload['text'])}\n"
+        f"Прогресс: <b>{h(status)}</b>\n"
+        f"Награда: <b>{reward.get('coins', 0)}</b> монет · репутация <b>{reward.get('rep', 0)}</b>"
+        + (f"\n\n✅ {h(reward_text)}" if reward_text else "")
+    )
+
+
+def render_owner_stats(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    lines = [
+        f"📈 <b>Статистика основателя</b>",
+        "",
+        f"Город: <b>{h(city['name'])}</b>",
+        f"Жители: <b>{payload['population']}</b> · активных 24ч: <b>{payload['active_24h']}</b>",
+        f"Действий за 24ч: <b>{payload['actions_24h']}</b>",
+        f"Режим: <b>{h(payload['mode']['name'])}</b>",
+        f"AI: <b>{h(payload['ai']['status'])}</b> · лимит {payload['ai']['daily_limit']}/день",
+    ]
+    if payload.get("top_action"):
+        lines.append(f"Популярное действие: <b>{h(payload['top_action']['action'])}</b> × {payload['top_action']['count']}")
+    if payload.get("top_player"):
+        p = payload["top_player"]
+        lines.append(f"Главный активист: <b>{h(p['name'])}</b> · влияние {p['influence']} · репа {p['rep']}")
+    return "\n".join(lines)
+
+
+def render_stars(payload: dict[str, Any]) -> str:
+    status = "включены" if payload.get("enabled") else "выключены"
+    lines = [f"⭐ <b>Telegram Stars</b>", "", f"Статус: <b>{status}</b>", ""]
+    for item in payload.get("items", []):
+        lines.append(f"• {h(item['name'])} — <b>{item['stars']}</b> ⭐ · {h(item['text'])}")
+    lines.append("\n" + h(payload.get("note", "")))
+    return "\n".join(lines)
+
+
+def render_ai_status(payload: dict[str, Any]) -> str:
+    return (
+        f"🤖 <b>AI-ведущий</b>\n\n"
+        f"Статус: <b>{h(payload.get('status'))}</b>\n"
+        f"Провайдер: <b>{h(payload.get('provider'))}</b>\n"
+        f"Модель: <b>{h(payload.get('model'))}</b>\n"
+        f"Лимит: <b>{payload.get('daily_limit')}</b> генераций на чат/день\n\n"
+        f"Если API выключен или ключа нет — бот спокойно работает на шаблонах. Не разваливается, уже приятно."
+    )
 
 def render_activity_mode(payload: dict[str, Any]) -> str:
     lines = [
@@ -1409,6 +1492,91 @@ async def cmd_firstevent(message: Message) -> None:
     await perform_first_event(message, force=True)
 
 
+@router.message(Command("secret", "secretrole"))
+async def cmd_secret_role(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Тайные роли доступны в группе.")
+        return
+    await perform_secret_role(message, message.from_user)
+
+
+@router.message(Command("mission"))
+async def cmd_mission(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Миссии доступны в группе.")
+        return
+    await perform_mission(message, message.from_user)
+
+
+@router.message(Command("owner_stats"))
+async def cmd_owner_stats(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Статистика доступна в группе.")
+        return
+    await perform_owner_stats(message, message.from_user)
+
+
+@router.message(Command("share"))
+async def cmd_share(message: Message, bot: Bot) -> None:
+    await perform_promo(message, bot)
+
+
+@router.message(Command("stars"))
+async def cmd_stars(message: Message) -> None:
+    await perform_stars(message)
+
+
+@router.message(Command("aistatus"))
+async def cmd_ai_status(message: Message) -> None:
+    await perform_ai_status(message)
+
+
+async def perform_secret_role(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        payload = secret_role_payload(db, city, player)
+    await send_game_message(message, render_secret_role(payload), reply_markup=back_keyboard())
+
+
+async def perform_mission(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        payload = mission_payload(db, city, player, check=True)
+    await send_game_message(message, render_mission(payload), reply_markup=back_keyboard())
+
+
+async def perform_owner_stats(message: Message, user: Any | None) -> None:
+    if not user or not await is_user_chat_owner(message.bot, message.chat.id, user.id):
+        await send_game_message(message, "📈 Статистика основателя доступна только владельцу чата.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = owner_stats_payload(db, city)
+    await send_game_message(message, render_owner_stats(payload), reply_markup=founder_keyboard())
+
+
+async def perform_stars(message: Message) -> None:
+    payload = stars_products_payload()
+    await send_game_message(message, render_stars(payload), reply_markup=back_keyboard() if is_group(message) else None)
+
+
+async def perform_ai_status(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title) if is_group(message) else (None, False)
+        payload = founder_panel_payload(db, city)["ai_leader"] if city else {"status": "выключен", "provider": get_settings().ai_provider, "model": get_settings().ai_model or "не выбран", "daily_limit": get_settings().ai_daily_limit_per_chat}
+    await send_game_message(message, render_ai_status(payload), reply_markup=back_keyboard() if is_group(message) else None)
+
+
 async def perform_promo(message: Message, bot: Bot | None = None) -> None:
     bot = bot or message.bot
     bot_username = await get_bot_username(bot)
@@ -1704,10 +1872,22 @@ async def perform_achievements(message: Message, user: Any | None) -> None:
 
 
 async def perform_day_summary(message: Message) -> None:
+    ai_text = None
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         payload = daily_summary_payload(db, city)
-    await send_game_message(message, render_day_summary(payload), reply_markup=back_keyboard())
+        allowed, _used, _limit = ai_usage_allowed(db, city)
+        ai_payload = ai_context_payload(db, city, "итоги дня") if allowed else None
+    if ai_payload:
+        ai_text = await generate_ai_text("итоги дня", ai_payload)
+        if ai_text:
+            with session_scope() as db:
+                city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+                register_ai_usage(db, city, "day_summary")
+    text = render_day_summary(payload)
+    if ai_text:
+        text += "\n\n🤖 <b>AI-ведущий:</b>\n" + h(ai_text)
+    await send_game_message(message, text, reply_markup=back_keyboard())
 
 
 async def perform_activity_mode(message: Message, user: Any | None, mode: str = "") -> None:
@@ -1953,10 +2133,22 @@ async def perform_quest(message: Message, user: Any | None, help_now: bool = Fal
 
 
 async def perform_newspaper(message: Message) -> None:
+    ai_text = None
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         payload = build_newspaper(db, city)
-    await send_game_message(message, render_newspaper(payload), reply_markup=back_keyboard())
+        allowed, used, limit = ai_usage_allowed(db, city)
+        ai_payload = ai_context_payload(db, city, "газету района") if allowed else None
+    if ai_payload:
+        ai_text = await generate_ai_text("газета района", ai_payload)
+        if ai_text:
+            with session_scope() as db:
+                city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+                register_ai_usage(db, city, "newspaper")
+    if ai_text:
+        await send_game_message(message, "🤖🗞 <b>AI-газета района</b>\n\n" + h(ai_text), reply_markup=back_keyboard())
+    else:
+        await send_game_message(message, render_newspaper(payload), reply_markup=back_keyboard())
 
 
 async def perform_top(message: Message) -> None:
@@ -2753,6 +2945,60 @@ async def cb_reset_confirm(callback: CallbackQuery) -> None:
         return
     await callback.answer("Сносим район…")
     await perform_resetcity_confirm(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:secret_role")
+async def cb_secret_role(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Тайные роли работают в группе.", show_alert=True)
+        return
+    await callback.answer("Смотрим роль…")
+    await perform_secret_role(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:mission")
+async def cb_mission(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Миссии работают в группе.", show_alert=True)
+        return
+    await callback.answer("Проверяем миссию…")
+    await perform_mission(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:owner_stats")
+async def cb_owner_stats(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Статистика работает в группе.", show_alert=True)
+        return
+    await callback.answer("Считаем район…")
+    await perform_owner_stats(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:stars")
+async def cb_stars(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_stars(callback.message)
+
+
+@router.callback_query(F.data == "cc:share")
+async def cb_share(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_promo(callback.message, callback.bot)
+
+
+@router.callback_query(F.data == "cc:ai_status")
+async def cb_ai_status(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_ai_status(callback.message)
 
 
 @router.callback_query(F.data == "cc:global_top")

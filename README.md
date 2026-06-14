@@ -1,388 +1,501 @@
-# Чатоград Bot v1.2 Railway
+import unittest
 
-**Чатоград** — Telegram-бот для групп, где обычный чат становится городом: жители, казна, работа, события, суды, подвал, постройки, магазин, ежедневные награды, сезоны, газета, драмы, выборы, квесты, рейды, трофеи и должности.
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-Версия **без Mini App**. Всё работает прямо в Telegram-группе через компактные кнопки. Архив подготовлен под деплой на **Railway + PostgreSQL**.
+from app.db import Base
+from app.game import (
+    build_city_building,
+    building_payload,
+    build_newspaper,
+    create_court_event,
+    create_daily_event,
+    create_drama_event,
+    create_mayor_election,
+    get_or_create_city,
+    get_or_create_player,
+    help_city_quest,
+    join_city,
+    player_profile,
+    quest_payload,
+    resolve_event,
+    start_war,
+    create_raid_challenge,
+    active_incoming_raids,
+    resolve_raid_challenge,
+    get_city_trophies,
+    appoint_city_official,
+    city_officials,
+    weekly_summary,
+    top_players,
+    top_cities,
+    collect_daily_reward,
+    daily_payload,
+    buy_shop_item,
+    shop_payload,
+    season_payload,
+    maybe_roll_season,
+    create_city_alliance,
+    city_alliances,
+    register_city_referral,
+    admin_stats,
+    black_market_payload,
+    buy_black_market_item,
+    create_duel_challenge,
+    create_rumor_event,
+    resolve_duel,
+    rename_city,
+    city_action_cooldown,
+    vote_event,
+    work,
+    faction_payload,
+    join_faction,
+    inventory_payload,
+    buy_item,
+    use_item,
+    steal_treasury,
+    create_revolt_event,
+    city_history_payload,
+    attempt_escape,
+    achievement_payload,
+    daily_summary_payload,
+    set_city_activity_mode,
+    activity_mode_payload,
+    auto_event_due,
+    create_launch_event,
+    city_launch_payload,
+    reset_city_progress,
+    raid_score_breakdown,
+    EARLY_CITY_TROPHY,
+    should_send_daily_summary,
+    FOUNDER_TITLE,
+    secret_role_payload,
+    mission_payload,
+    owner_stats_payload,
+    ai_context_payload,
+    ai_usage_allowed,
+    register_ai_usage,
+    stars_products_payload,
+)
 
-## Что нового в v1.2
 
-- Добавлен **вау-первый запуск**: при создании города бот сразу показывает статус района, трофей раннего запуска и первый скандал.
-- Добавлен **первый ивент** `/firstevent` и кнопка в кабинете основателя.
-- Первые 100 городов получают вечный трофей **🏛 Основатели Чатограда**.
-- Добавлена команда `/promo` с красивой ссылкой добавления бота в другие чаты.
-- Расширен **кабинет основателя**: промо, первый ивент, режимы, сброс района.
-- Добавлен безопасный сброс города `/resetcity` с подтверждением: жители остаются, прогресс сбрасывается.
-- Улучшены рейды: теперь есть понятный счёт, бонусы за союзы/трофеи/население и позорный трофей проигравшему.
-- Добавлена заготовка под **AI-ведущего** через env-переменные, пока выключено по умолчанию.
-- Добавлены индексы БД для событий/рейдов/города.
-- Railway/PostgreSQL-настройки сохранены.
-
-## Что уже есть
-
-- Telegram-бот на `aiogram 3`.
-- База через `SQLAlchemy 2`.
-- PostgreSQL через `psycopg v3`.
-- SQLite fallback для временного локального запуска.
-- Игровой город для каждого группового чата.
-- Компактная кнопочная панель действий.
-- Автоматическое добавление людей в жители города, кроме ботов.
-- Профиль игрока, уровень, XP, серия ежедневных наград.
-- Суд, подвал и судимости.
-- Постройки города.
-- Магазин города.
-- Сезоны.
-- Жители, роли, монеты, казна, опыт, уровень города.
-- Работа жителей.
-- Ежедневные события.
-- Голосование кнопками.
-- Завершение событий.
-- Газета Чатограда.
-- Общий квест дня.
-- Драма дня.
-- Выборы мэра.
-- Топ жителей и топ городов.
-- Реферальные ссылки для приглашения бота в другие чаты.
-- Союзы между городами.
-- Рейды между городами по коду.
-- Трофеи города.
-- Должности от владельца чата.
-- Еженедельные итоги.
-- Логи города.
-- Реферальная ссылка в личке.
-- Админ-статистика через `/admin_stats`.
-- Достижения через `/achievements`.
-- Итоги дня через `/day`.
-- Режим активности через `/mode quiet`, `/mode normal`, `/mode chaos`.
-- Фракции, предметы, ограбления казны, бунты, побег и летопись города.
-- Дуэли между жителями.
-- Чёрный рынок.
-- Слухи района.
-- Кабинет основателя и переименование города.
-- Вау-первый запуск нового города.
-- Трофей раннего запуска для первых 100 городов.
-- Промо-ссылка `/promo` для сарафанки.
-- Сброс города владельцем через `/resetcity`.
-- Улучшенные рейды со счётом и позорным трофеем.
-- Docker/Railway-ready файлы.
+def make_session():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)()
 
 
-## Быстрый деплой на Railway
+class GameLogicTest(unittest.TestCase):
+    def test_city_join_work_event_and_war_flow(self):
+        db = make_session()
 
-Подробная инструкция лежит в [`RAILWAY_DEPLOY.md`](RAILWAY_DEPLOY.md).
+        city, created = get_or_create_city(db, -1001, "Alpha Chat")
+        self.assertTrue(created)
+        player, created_player, _ = get_or_create_player(db, 1, "alice", "Alice")
+        self.assertTrue(created_player)
 
-Минимальный порядок:
+        membership, joined = join_city(db, city, player)
+        self.assertTrue(joined)
+        self.assertEqual(membership.influence, 1)
 
-1. Залей проект на GitHub.
-2. В Railway создай проект из GitHub-репозитория.
-3. Добавь PostgreSQL service.
-4. В сервисе бота добавь переменные:
+        result = work(db, city, player, cooldown_hours=0)
+        self.assertGreater(result.coins, 0)
+        self.assertGreater(city.treasury, 25)
 
-```env
-BOT_TOKEN=твой_токен_от_BotFather
-DATABASE_URL=${{Postgres.DATABASE_URL}}
-RUN_BOT_POLLING=true
-ENABLE_AUTO_EVENTS=true
-AUTO_EVENT_INTERVAL_MINUTES=30
-AUTO_EVENT_MIN_POPULATION=1
-ADMIN_IDS=123456789
-APP_SECRET=длинный_секрет_32_символа_или_больше
-DB_POOL_SIZE=5
-DB_MAX_OVERFLOW=10
-DB_POOL_RECYCLE_SECONDS=1800
-AI_ENABLED=false
-AI_PROVIDER=openrouter
-AI_MODEL=
-AI_DAILY_LIMIT_PER_CHAT=3
-```
+        event = create_daily_event(db, city, force=True)
+        self.assertIsNotNone(event)
+        event, message = vote_event(db, city, player, 1)
+        self.assertIn("Голос принят", message)
 
-`PORT` руками не указывай. Railway сам его выдаёт, приложение само читает.
+        top = top_players(db, city)
+        self.assertEqual(top[0]["name"], "@alice")
+        self.assertIn("title", top[0])
 
-После деплоя проверь:
+        defender, _ = get_or_create_city(db, -1002, "Beta Chat")
+        war, war_text = start_war(db, city, defender.invite_code)
+        self.assertIsNotNone(war)
+        self.assertEqual(war.status, "finished")
+        self.assertTrue(war_text)
+
+    def test_v03_viral_features(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -2001, "Drama Chat")
+        users = []
+        for uid, username in [(1, "alice"), (2, "bob"), (3, "carol")]:
+            player, _, _ = get_or_create_player(db, uid, username, username.title())
+            join_city(db, city, player)
+            users.append(player)
+
+        drama = create_drama_event(db, city, force=True)
+        self.assertIsNotNone(drama)
+        self.assertIn("@", drama.text)
+
+        drama.resolved_at = None
+        election_blocked = create_mayor_election(db, city)
+        self.assertIsNone(election_blocked)
+        drama.resolved_at = drama.created_at
+        db.flush()
+
+        election = create_mayor_election(db, city)
+        self.assertIsNotNone(election)
+        vote_event(db, city, users[0], 1)
+        vote_event(db, city, users[1], 1)
+        text = resolve_event(db, city)
+        self.assertIn("Новый мэр", text)
+
+        quest_before = quest_payload(db, city)
+        payload, quest_text = help_city_quest(db, city, users[0])
+        self.assertGreaterEqual(payload["progress"], quest_before["progress"] + 1)
+        self.assertTrue(quest_text)
+        _, second_text = help_city_quest(db, city, users[0])
+        self.assertIn("уже помогал", second_text)
+
+        newspaper = build_newspaper(db, city)
+        self.assertIn("city", newspaper)
+        self.assertIn("quest", newspaper)
+        self.assertIn("logs", newspaper)
+
+    def test_founder_title_only_for_chat_owner(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -3001, "Owner Chat")
+        owner, _, _ = get_or_create_player(db, 10, "owner", "Owner")
+        guest, _, _ = get_or_create_player(db, 11, "guest", "Guest")
+
+        guest_membership, _ = join_city(db, city, guest, is_chat_owner=False)
+        self.assertIsNone(guest_membership.special_title)
+
+        owner_membership, _ = join_city(db, city, owner, is_chat_owner=True)
+        self.assertEqual(owner_membership.special_title, FOUNDER_TITLE)
+        self.assertEqual(city.owner_telegram_user_id, owner.telegram_user_id)
+
+        top = top_players(db, city)
+        owner_row = next(item for item in top if item["telegram_user_id"] == owner.telegram_user_id)
+        guest_row = next(item for item in top if item["telegram_user_id"] == guest.telegram_user_id)
+        self.assertIn("Основатель", owner_row["title"])
+        self.assertNotIn("Основатель", guest_row["title"])
+
+    def test_v05_court_jail_buildings_and_profile(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -4001, "Court Chat")
+        player, _, _ = get_or_create_player(db, 20, "judgebait", "Judge")
+        join_city(db, city, player)
+
+        city.treasury = 300
+        ok, text, buildings = build_city_building(db, city, "shawarma")
+        self.assertTrue(ok)
+        self.assertIn("shawarma", buildings["owned"])
+        self.assertLess(city.treasury, 300)
+
+        profile_before = player_profile(db, city, player)
+        self.assertEqual(profile_before["status"], "свободен")
+
+        court = create_court_event(db, city, target=player, force=True)
+        self.assertIsNotNone(court)
+        self.assertIn("court:", court.event_key)
+        vote_event(db, city, player, 2)
+        result_text = resolve_event(db, city)
+        self.assertIn("подвал", result_text)
+
+        profile_after = player_profile(db, city, player)
+        self.assertIn("подвал", profile_after["status"])
+        self.assertGreaterEqual(profile_after["convictions"], 1)
+
+        payload = building_payload(city)
+        self.assertTrue(payload["items"])
+
+    def test_v06_raids_trophies_officials_and_weekly(self):
+        db = make_session()
+        attacker, _ = get_or_create_city(db, -5001, "Attack Chat")
+        defender, _ = get_or_create_city(db, -5002, "Defense Chat")
+
+        owner, _, _ = get_or_create_player(db, 30, "owner", "Owner")
+        judge, _, _ = get_or_create_player(db, 31, "judge", "Judge")
+        join_city(db, attacker, owner, is_chat_owner=True)
+        join_city(db, attacker, judge)
+        join_city(db, defender, judge)
+
+        ok, text = appoint_city_official(db, attacker, judge, "судья")
+        self.assertTrue(ok)
+        self.assertIn("Судья", text)
+        officials = city_officials(db, attacker)
+        self.assertEqual(officials[0]["name"], "@judge")
+
+        war, challenge_text, target, created = create_raid_challenge(db, attacker, defender.invite_code)
+        self.assertTrue(created)
+        self.assertIsNotNone(war)
+        self.assertEqual(target.id, defender.id)
+        incoming = active_incoming_raids(db, defender)
+        self.assertEqual(incoming[0]["id"], war.id)
+
+        resolved, raid_text = resolve_raid_challenge(db, defender, war.id)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.status, "finished")
+        self.assertTrue(raid_text)
+        self.assertTrue(get_city_trophies(attacker) or get_city_trophies(defender))
+
+        summary = weekly_summary(db, attacker)
+        self.assertIn("city", summary)
+        self.assertIn("top", summary)
+
+    def test_v07_daily_shop_season_and_global_top(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -7001, "Season Chat")
+        player, _, _ = get_or_create_player(db, 70, "daily", "Daily")
+        join_city(db, city, player)
+
+        ok, text, payload = collect_daily_reward(db, city, player)
+        self.assertTrue(ok)
+        self.assertIn("ежеднев", text.lower())
+        self.assertTrue(daily_payload(player)["collected"])
+        profile = player_profile(db, city, player)
+        self.assertGreaterEqual(profile["level"], 1)
+        self.assertIn("daily_streak", profile)
+
+        city.treasury = 500
+        ok, shop_text, shop = buy_shop_item(db, city, "festival")
+        self.assertTrue(ok)
+        self.assertIn("festival", shop["owned"])
+        self.assertTrue(shop_payload(city)["items"])
+
+        season = season_payload(city)
+        self.assertEqual(season["number"], 1)
+        rolled, roll_text, new_season = maybe_roll_season(db, city, force=True)
+        self.assertTrue(rolled)
+        self.assertIn("Сезон", roll_text)
+        self.assertEqual(new_season["number"], 2)
+
+        cities = top_cities(db, limit=3)
+        self.assertTrue(cities)
+        self.assertIn("population", cities[0])
+        self.assertIn("rank", cities[0])
+
+    def test_v08_referrals_alliances_and_admin_stats(self):
+        db = make_session()
+        referrer, _ = get_or_create_city(db, -8001, "Referrer Chat")
+        invited, _ = get_or_create_city(db, -8002, "Invited Chat")
+        third, _ = get_or_create_city(db, -8003, "Alliance Chat")
+
+        ok, text = register_city_referral(db, invited, "city_" + referrer.invite_code)
+        self.assertTrue(ok)
+        self.assertIn("Бонус", text)
+        self.assertGreaterEqual(referrer.treasury, 145)
+
+        ok_again, text_again = register_city_referral(db, invited, referrer.invite_code)
+        self.assertFalse(ok_again)
+        self.assertIsNone(text_again)
+
+        ok, ally_text, target = create_city_alliance(db, invited, third.invite_code)
+        self.assertTrue(ok)
+        self.assertIsNotNone(target)
+        self.assertIn("союз", ally_text.lower())
+        alliances = city_alliances(db, invited)
+        self.assertEqual(len(alliances), 1)
+        self.assertEqual(alliances[0]["name"], third.name)
+
+        top = top_cities(db, limit=5)
+        self.assertIn("alliances_count", top[0])
+        self.assertIn("referrals_count", top[0])
+        self.assertIn("trophies_count", top[0])
+
+        stats = admin_stats(db)
+        self.assertGreaterEqual(stats["cities_total"], 3)
+        self.assertEqual(stats["referrals_total"], 1)
+        self.assertEqual(stats["alliances_total"], 1)
+
+    def test_v09_duels_black_market_rumors_and_owner_tools(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -9001, "Market Chat")
+        alice, _, _ = get_or_create_player(db, 91, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 92, "bob", "Bob")
+        join_city(db, city, alice, is_chat_owner=True)
+        join_city(db, city, bob)
+        alice.coins = 200
+        bob.coins = 200
+
+        rumor = create_rumor_event(db, city, force=True)
+        self.assertIsNotNone(rumor)
+        self.assertEqual(rumor.event_key, "rumor")
+        allowed, left = city_action_cooldown(db, city, "rumor", 30)
+        self.assertFalse(allowed)
+        self.assertGreaterEqual(left, 1)
+
+        payload = black_market_payload(city)
+        self.assertTrue(payload["items"])
+        ok, text, _payload, event = buy_black_market_item(db, city, alice, "fake_rep")
+        self.assertTrue(ok)
+        self.assertIn("репутац", text.lower())
+        self.assertIsNone(event)
+
+        duel, duel_text = create_duel_challenge(db, city, alice, bob, 25)
+        self.assertIsNotNone(duel)
+        self.assertIn("дуэль", duel_text.lower())
+        resolved, result = resolve_duel(db, city, duel.id, bob)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.status, "finished")
+        self.assertTrue(result.winner)
+
+        ok, rename_text = rename_city(db, city, "Новый Район")
+        self.assertTrue(ok)
+        self.assertIn("Новый Район", rename_text)
+        self.assertEqual(city.name, "Новый Район")
+
+    def test_v10_factions_items_revolt_steal_history(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -10001, "Faction Chat")
+        alice, _, _ = get_or_create_player(db, 101, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 102, "bob", "Bob")
+        join_city(db, city, alice)
+        join_city(db, city, bob)
+        alice.coins = 300
+        bob.coins = 300
+        city.treasury = 300
+
+        ok, text, factions = join_faction(db, city, alice, "mafia")
+        self.assertTrue(ok)
+        self.assertIn("Мафия", text)
+        self.assertTrue(any(item["count"] >= 1 for item in factions["factions"]))
+        profile = player_profile(db, city, alice)
+        self.assertIn("Мафия", profile["faction"])
+
+        ok, item_text, inventory = buy_item(db, city, alice, "smoke")
+        self.assertTrue(ok)
+        self.assertTrue(inventory["items"])
+        ok, use_text, inventory_after = use_item(db, city, alice, "smoke")
+        self.assertTrue(ok)
+        self.assertIn("задымил", use_text)
+
+        ok, steal_text = steal_treasury(db, city, alice)
+        self.assertTrue(steal_text)
+        self.assertIn("казн", steal_text.lower())
+
+        event, revolt_text = create_revolt_event(db, city, bob, force=True)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_key, "revolt")
+        vote_event(db, city, alice, 1)
+        vote_event(db, city, bob, 1)
+        resolved = resolve_event(db, city)
+        self.assertIn("Бунт", resolved)
+
+        history = city_history_payload(city)
+        self.assertTrue(history["items"])
+
+        # escape path should not crash whether theft jailed the player or not
+        ok, escape_text, _ = attempt_escape(db, city, alice)
+        self.assertTrue(escape_text)
+
+
+    def test_v11_achievements_daily_summary_and_activity_modes(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -11001, "Retention Chat")
+        owner, _, _ = get_or_create_player(db, 111, "owner", "Owner")
+        player, _, _ = get_or_create_player(db, 112, "worker", "Worker")
+        join_city(db, city, owner, is_chat_owner=True)
+        join_city(db, city, player)
+        player.coins = 120
+        work(db, city, player, cooldown_hours=0)
+        achievements = achievement_payload(db, city, player)
+        self.assertGreaterEqual(achievements["owned_count"], 2)
+        self.assertTrue(achievements["items"])
+
+        ok, text, mode = set_city_activity_mode(db, city, "chaos")
+        self.assertTrue(ok)
+        self.assertIn("Хаос", text)
+        self.assertEqual(activity_mode_payload(city)["key"], "chaos")
+        self.assertTrue(auto_event_due(city))
+
+        summary = daily_summary_payload(db, city)
+        self.assertIn("city", summary)
+        self.assertIn("top", summary)
+        self.assertTrue(summary["logs"])
+        self.assertFalse(should_send_daily_summary(city))
+
+    def test_v12_launch_reset_early_trophy_and_better_raids(self):
+        db = make_session()
+        city, created = get_or_create_city(db, -12001, "Launch Chat")
+        self.assertTrue(created)
+        self.assertIn(EARLY_CITY_TROPHY, get_city_trophies(city))
+
+        payload = city_launch_payload(db, city)
+        self.assertIn("city", payload)
+        self.assertEqual(payload["early_trophy"], EARLY_CITY_TROPHY)
+
+        event = create_launch_event(db, city)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_key, "launch_first_event")
+        self.assertIsNone(create_launch_event(db, city))
+
+        attacker, _ = get_or_create_city(db, -12002, "Raiders")
+        defender, _ = get_or_create_city(db, -12003, "Defenders")
+        alice, _, _ = get_or_create_player(db, 1201, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 1202, "bob", "Bob")
+        join_city(db, attacker, alice)
+        join_city(db, defender, bob)
+        attacker.treasury = 400
+        defender.treasury = 400
+        parts = raid_score_breakdown(db, attacker)
+        self.assertIn("total", parts)
+        self.assertGreater(parts["total"], 0)
+        war, _text, _target, created = create_raid_challenge(db, attacker, defender.invite_code)
+        self.assertTrue(created)
+        resolved, raid_text = resolve_raid_challenge(db, defender, war.id)
+        self.assertIsNotNone(resolved)
+        self.assertIn("Счёт", raid_text)
+        self.assertTrue(get_city_trophies(attacker) or get_city_trophies(defender))
+
+        city.treasury = 999
+        city.level = 4
+        ok, reset_text = reset_city_progress(db, city)
+        self.assertTrue(ok)
+        self.assertIn("сброшен", reset_text.lower())
+        self.assertEqual(city.level, 1)
+        self.assertEqual(city.treasury, 25)
+        self.assertIn(EARLY_CITY_TROPHY, get_city_trophies(city))
+
+
+
+    def test_v13_ai_secret_roles_missions_owner_stats_and_stars(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -13001, "AI Chat")
+        owner, _, _ = get_or_create_player(db, 1301, "owner", "Owner")
+        player, _, _ = get_or_create_player(db, 1302, "agent", "Agent")
+        join_city(db, city, owner, is_chat_owner=True)
+        join_city(db, city, player)
+
+        role = secret_role_payload(db, city, player)
+        self.assertIn("name", role)
+        self.assertTrue(role["key"])
+
+        mission = mission_payload(db, city, player, check=False)
+        self.assertTrue(mission["active"])
+        self.assertIn("name", mission)
+
+        work(db, city, player, cooldown_hours=0)
+        mission_checked = mission_payload(db, city, player, check=True)
+        self.assertIn("completed", mission_checked)
+
+        stats = owner_stats_payload(db, city)
+        self.assertIn("active_24h", stats)
+        self.assertIn("ai", stats)
+
+        context = ai_context_payload(db, city, "тест")
+        self.assertIn("city", context)
+        allowed, used, limit = ai_usage_allowed(db, city)
+        self.assertFalse(allowed)
+        register_ai_usage(db, city, "test")
+        self.assertTrue(stars_products_payload()["items"])
+
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+## Новые команды v1.3
 
 ```text
-/api/health
-/api/ready
-```
-
-Важно: держи **1 реплику** бота и не запускай локальную копию одновременно с Railway, иначе Telegram polling начнёт конфликтовать.
-
-## Быстрый запуск локально с PostgreSQL
-
-Нужен установленный Docker Desktop.
-
-```bash
-cd chaos_city_bot
-```
-
-Запусти PostgreSQL:
-
-```bash
-docker compose up -d postgres
-```
-
-Создай виртуальное окружение:
-
-```bash
-python -m venv .venv
-```
-
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-copy .env.example .env
-```
-
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-В `.env` вставь токен от BotFather:
-
-```env
-BOT_TOKEN=твой_токен_бота
-DATABASE_URL=postgresql+psycopg://chatograd:chatograd_password@localhost:5432/chatograd
-RUN_BOT_POLLING=true
-ENABLE_AUTO_EVENTS=true
-PORT=8080
-ADMIN_IDS=
-```
-
-Запусти бота:
-
-```bash
-python -m app.main
-```
-
-Проверка health:
-
-```text
-http://localhost:8080/api/health
-```
-
-Если порт 8080 занят, поменяй в `.env`:
-
-```env
-PORT=8081
-```
-
-## Если PostgreSQL не запускается
-
-Проверить контейнеры:
-
-```bash
-docker ps
-```
-
-Посмотреть логи PostgreSQL:
-
-```bash
-docker compose logs postgres
-```
-
-Перезапустить PostgreSQL:
-
-```bash
-docker compose restart postgres
-```
-
-Полностью удалить локальную PostgreSQL-базу и создать заново:
-
-```bash
-docker compose down -v
-docker compose up -d postgres
-```
-
-Осторожно: `down -v` удалит локальные данные PostgreSQL.
-
-## Быстрый запуск на SQLite, если PostgreSQL пока не нужен
-
-В `.env` можно временно поставить:
-
-```env
-DATABASE_URL=sqlite:///./chatograd.db
-```
-
-Но для реального бота лучше PostgreSQL. SQLite норм для теста, но не для живого проекта с группами и автособытиями.
-
-## Railway / Render / Neon PostgreSQL URL
-
-Можно вставлять URL от хостинга почти как есть:
-
-```env
-DATABASE_URL=postgres://user:password@host:5432/dbname
-```
-
-или:
-
-```env
-DATABASE_URL=postgresql://user:password@host:5432/dbname
-```
-
-Приложение само переведёт это в формат `postgresql+psycopg://...`.
-
-Переменные окружения для Railway:
-
-```env
-BOT_TOKEN=твой_токен
-DATABASE_URL=postgres://...
-RUN_BOT_POLLING=true
-ENABLE_AUTO_EVENTS=true
-PORT=8080
-ADMIN_IDS=
-DB_POOL_SIZE=5
-DB_MAX_OVERFLOW=10
-DB_POOL_RECYCLE_SECONDS=1800
-```
-
-Railway-запуск уже прописан в `railway.json`:
-
-```json
-"startCommand": "python -m app.main"
-```
-
-`Procfile` оставлен как fallback:
-
-```text
-web: python -m app.main
-```
-
-## Проверка в Telegram
-
-1. Напиши боту `/start` в личке.
-2. Добавь его в группу.
-3. В группе напиши `/start`.
-4. Владелец группы нажимает **👑 Основатель** в меню **⚙️ Ещё** или пишет `/founder`.
-5. Дальше игра идёт кнопками.
-6. Рейды: в одном чате скопируй код города, в другом напиши `/raid CODE`, затем во втором городе открой `/raids` и прими вызов.
-7. Союзы: в одном чате скопируй код города, в другом напиши `/ally CODE`.
-8. Сарафанка: нажми **📣 Позвать** в меню **⚔️ Война** — бот даст ссылку, которая наградит твой город за новый чат.
-
-## Команды в группе
-
-```text
-start       - активировать город
-menu        - панель с кнопками
-city        - статус города
-founder     - забрать титул основателя, только владелец чата
-profile     - профиль игрока
-daily       - ежедневная награда
-shop        - магазин города
-market      - чёрный рынок
-rumor       - слух района
-duel        - дуэль: /duel @username 20
-founderpanel - кабинет основателя
-renamecity  - переименовать город, только владелец
-season      - сезон города
-build       - постройки города
-court       - суд Чатограда
-work        - работа
-quest       - квест дня
-gazeta      - газета
-event       - событие
-drama       - драма дня
-election    - выборы мэра
-vote        - голосование числом: /vote 1
-resolve     - завершить голосование
-top         - топ жителей
-raid        - вызвать другой город: /raid CODE
-raids       - входящие рейды
-officials   - должности города
-appoint     - назначить должность: /appoint @user судья
-weekly      - итоги недели
-logs        - логи
-help        - панель
-factions    - фракции города
-faction     - вступить во фракцию: /faction mafia
-items       - предметы игрока
-useitem     - использовать предмет: /useitem lockpick
-steal       - попытаться ограбить казну
-revolt      - начать бунт
-escape      - попытаться сбежать из подвала
-history     - летопись города
-promo       - промо-ссылка для добавления бота
-firstevent  - первый скандал района
-resetcity   - сброс города, только владелец
-achievements - достижения
-day         - итоги дня
-mode        - режим активности: /mode quiet|normal|chaos
-```
-
-## Команды для BotFather `/setcommands`
-
-```text
-start - запустить Чатоград
-menu - панель города
-city - статус города
-founder - основатель района
-profile - профиль игрока
-daily - ежедневная награда
-shop - магазин города
-market - чёрный рынок
-rumor - слух района
-duel - дуэль
-founderpanel - кабинет основателя
-renamecity - переименовать город
-season - сезон города
-work - работать
-quest - квест дня
-gazeta - газета Чатограда
-event - событие
-drama - драма дня
-election - выборы мэра
-vote - проголосовать
-resolve - завершить событие
-top - рейтинг
-raid - вызвать город на рейд
-raids - входящие рейды
-officials - должности города
-weekly - итоги недели
-help - помощь
-factions - фракции города
-items - предметы
-steal - ограбить казну
-revolt - бунт
-escape - побег из подвала
-history - летопись города
-```
-
-## Команды в личке
-
-```text
-/start       - профиль, реферальная ссылка, кнопка добавления в чат
-/top         - глобальный топ городов
-/help        - короткая панель
-```
-
-## Важно про сообщения
-
-Бот старается редактировать старое игровое сообщение, а не слать новое. Если Telegram не даст отредактировать сообщение, бот отправит новое как fallback. Пользовательские команды вроде `/city` бот всё ещё пытается удалять, чтобы чат не превращался в склад макулатуры.
-
-## Важно про автожителей
-
-Бот не может получить список всех старых молчаливых участников чата через Telegram API. Поэтому он автоматически добавляет:
-
-- новых людей при входе в группу;
-- любого человека, который написал сообщение в группе;
-- любого человека, который нажал кнопку бота;
-- владельца чата при `/start` или нажатии **👑 Основатель**.
-
-Другие боты в город не добавляются.
-
-## Важно про титул основателя
-
-`Основатель района` проверяется через Telegram `get_chat_member`. Бот смотрит, является ли пользователь владельцем чата (`creator`).
-
-Администратор без статуса владельца титул не получит. Только владелец чата.
-
-## Проверка кода
-
-```bash
-python -m compileall app tests
-python -m unittest discover -s tests -v
+secret      - тайная роль
+mission     - личная миссия
+owner_stats - статистика владельца чата
+share       - промо-пост/ссылка добавления
+stars       - Stars-заготовка
+aistatus    - статус AI-ведущего
 ```

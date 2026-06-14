@@ -115,6 +115,8 @@ ACHIEVEMENTS: dict[str, dict[str, str]] = {
     "thief": {"name": "🕶 Руки у казны", "text": "попытался ограбить казну"},
     "rebel": {"name": "🔥 Организатор бунта", "text": "поднял район на бунт"},
     "duelist": {"name": "⚔️ Дуэлянт", "text": "участвовал в дуэли"},
+    "mission": {"name": "🎯 Выполнил миссию", "text": "закрыл личную секретную задачу"},
+    "secret_role": {"name": "🕵️ Тайная роль", "text": "получил скрытую роль района"},
 }
 
 
@@ -156,6 +158,32 @@ ITEMS: dict[str, dict[str, Any]] = {
     "compromat": {"name": "📜 Компромат", "text": "бьёт по репутации случайного соперника"},
     "smoke": {"name": "💨 Дымовая шашка", "text": "помогает при краже казны"},
     "fake_crown": {"name": "👑 Фальшивая корона", "text": "даёт влияние и смешной статус"},
+}
+
+
+SECRET_ROLES: dict[str, dict[str, str]] = {
+    "thief": {"name": "🕶 Подпольный вор", "text": "лучше чувствует мутные сделки и кражи"},
+    "informant": {"name": "📰 Информатор", "text": "любит слухи и газеты"},
+    "mayor_agent": {"name": "👑 Агент мэрии", "text": "получает уважение при политическом движе"},
+    "double_agent": {"name": "🎭 Двойной агент", "text": "в рейдах всегда выглядит подозрительно полезным"},
+    "banker_shadow": {"name": "🏦 Теневой банкир", "text": "сильнее играет вокруг казны"},
+    "provocateur": {"name": "🔥 Провокатор", "text": "бунты и драмы липнут сами"},
+}
+
+MISSIONS: dict[str, dict[str, Any]] = {
+    "work_once": {"name": "💼 Отметиться на работе", "text": "поработай 1 раз", "action": "work", "need": 1, "coins": 18, "rep": 2},
+    "help_quest": {"name": "🎯 Помочь району", "text": "помоги общему квесту", "action": "quest", "need": 1, "coins": 20, "rep": 2},
+    "daily": {"name": "🎁 Забрать пайку", "text": "забери ежедневную награду", "action": "daily", "need": 1, "coins": 16, "rep": 1},
+    "rumor": {"name": "🗣 Подогреть слухи", "text": "запусти слух района", "action": "rumor", "need": 1, "coins": 22, "rep": 2},
+    "black_market": {"name": "🕶 Мутная покупка", "text": "купи что-нибудь на чёрном рынке", "action": "black_market", "need": 1, "coins": 25, "rep": 1},
+    "duel": {"name": "⚔️ Проверка характера", "text": "создай или заверши дуэль", "action": "duel_created", "need": 1, "coins": 25, "rep": 3},
+}
+
+STARS_PRODUCTS: dict[str, dict[str, Any]] = {
+    "rename_city": {"name": "🏷 Переименование города", "stars": 25, "text": "косметическая смена названия"},
+    "premium_event": {"name": "🎭 Премиум-событие", "stars": 35, "text": "особый городской ивент без pay-to-win"},
+    "gold_title": {"name": "👑 Золотой титул", "stars": 50, "text": "косметический титул для понтов"},
+    "festival": {"name": "🎉 Праздник района", "stars": 75, "text": "красивый общий праздник для чата"},
 }
 
 LEGENDARY_EVENTS = [
@@ -881,6 +909,8 @@ def player_profile(db: Session, city: City, player: Player) -> dict[str, Any]:
         "status": membership_status(membership),
         "convictions": membership.convictions if membership else 0,
         "achievements_count": len(get_achievements(membership)),
+        "secret_role": SECRET_ROLES.get(membership.secret_role or "", {}).get("name") if membership else "нет",
+        "mission": mission_payload(db, city, player, check=True) if membership else {"active": False},
         "joined": bool(membership),
     }
 
@@ -2659,6 +2689,187 @@ def should_send_daily_summary(city: City) -> bool:
     last = _aware(city.last_daily_summary_at)
     hours = 24 if mode == "normal" else 12
     return not last or utcnow() >= last + timedelta(hours=hours)
+
+
+
+# ---- v1.3: AI payloads, secret roles, missions, owner stats, Stars skeleton ----
+
+
+def _membership_for(db: Session, city: City, player: Player) -> Membership | None:
+    return db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+
+
+def get_or_assign_secret_role(db: Session, city: City, player: Player) -> tuple[str | None, bool]:
+    membership = _membership_for(db, city, player)
+    if not membership:
+        return None, False
+    if membership.secret_role in SECRET_ROLES:
+        return membership.secret_role, False
+    key = random.choice(list(SECRET_ROLES.keys()))
+    membership.secret_role = key
+    membership.reputation += 1
+    grant_achievement(db, city, player, "secret_role")
+    log(db, city.id, player.id, "secret_role", f"{display_player(player)} получил тайную роль: {SECRET_ROLES[key]['name']}.")
+    db.flush()
+    return key, True
+
+
+def secret_role_payload(db: Session, city: City, player: Player) -> dict[str, Any]:
+    key, created = get_or_assign_secret_role(db, city, player)
+    spec = SECRET_ROLES.get(key or "") or {"name": "нет", "text": "роль не назначена"}
+    return {"key": key, "created": created, "name": spec["name"], "text": spec["text"]}
+
+
+def _mission_action_count(db: Session, city: City, player: Player, action: str, since: datetime | None) -> int:
+    query = select(func.count(ActionLog.id)).where(
+        ActionLog.city_id == city.id,
+        ActionLog.player_id == player.id,
+        ActionLog.action == action,
+    )
+    if since:
+        query = query.where(ActionLog.created_at >= since)
+    return int(db.scalar(query) or 0)
+
+
+def _choose_mission_for(membership: Membership) -> str:
+    keys = list(MISSIONS.keys())
+    if membership.secret_role == "informant" and "rumor" in keys:
+        return "rumor"
+    if membership.secret_role == "thief" and "black_market" in keys:
+        return "black_market"
+    if membership.secret_role == "provocateur" and "duel" in keys:
+        return random.choice(["duel", "rumor"])
+    return random.choice(keys)
+
+
+def mission_payload(db: Session, city: City, player: Player, check: bool = True) -> dict[str, Any]:
+    membership = _membership_for(db, city, player)
+    if not membership:
+        return {"active": False, "text": "Сначала вступи в город.", "completed": False}
+
+    get_or_assign_secret_role(db, city, player)
+    now = utcnow()
+    started = _aware(membership.mission_started_at)
+    completed = _aware(membership.mission_completed_at)
+    expired = bool(started and now >= started + timedelta(hours=24))
+    if not membership.mission_key or membership.mission_key not in MISSIONS or expired or (completed and _same_utc_day(completed, now)):
+        if not (completed and _same_utc_day(completed, now)):
+            membership.mission_key = _choose_mission_for(membership)
+            membership.mission_started_at = now
+            membership.mission_completed_at = None
+            started = now
+            completed = None
+
+    key = membership.mission_key if membership.mission_key in MISSIONS else _choose_mission_for(membership)
+    spec = MISSIONS[key]
+    started = _aware(membership.mission_started_at) or now
+    count = _mission_action_count(db, city, player, str(spec["action"]), started)
+    is_done = bool(membership.mission_completed_at)
+    reward_text = ""
+    if check and not is_done and count >= int(spec["need"]):
+        membership.mission_completed_at = now
+        reward_coins = int(spec["coins"])
+        reward_rep = int(spec["rep"])
+        player.coins += reward_coins
+        player.xp += 8
+        membership.reputation += reward_rep
+        membership.influence += 1
+        city.xp += 6
+        grant_achievement(db, city, player, "mission")
+        reward_text = f"Миссия выполнена: +{reward_coins} монет, +{reward_rep} репутации."
+        log(db, city.id, player.id, "mission_complete", f"{display_player(player)} выполнил миссию: {spec['name']}.")
+        is_done = True
+    db.flush()
+    return {
+        "active": True,
+        "key": key,
+        "name": spec["name"],
+        "text": spec["text"],
+        "need": int(spec["need"]),
+        "progress": min(count, int(spec["need"])),
+        "completed": is_done,
+        "reward": {"coins": int(spec["coins"]), "rep": int(spec["rep"])},
+        "reward_text": reward_text,
+    }
+
+
+def owner_stats_payload(db: Session, city: City) -> dict[str, Any]:
+    since_day = utcnow() - timedelta(days=1)
+    population = city_population(db, city.id)
+    active_people = db.scalar(
+        select(func.count(func.distinct(ActionLog.player_id))).where(
+            ActionLog.city_id == city.id,
+            ActionLog.player_id.is_not(None),
+            ActionLog.created_at >= since_day,
+        )
+    ) or 0
+    actions = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.city_id == city.id, ActionLog.created_at >= since_day)) or 0
+    top_action = db.execute(
+        select(ActionLog.action, func.count(ActionLog.id).label("n"))
+        .where(ActionLog.city_id == city.id, ActionLog.created_at >= since_day)
+        .group_by(ActionLog.action)
+        .order_by(desc("n"))
+        .limit(1)
+    ).first()
+    top_player_row = db.execute(
+        select(Player, Membership)
+        .join(Membership, Membership.player_id == Player.id)
+        .where(Membership.city_id == city.id)
+        .order_by(desc(Membership.influence), desc(Membership.reputation))
+        .limit(1)
+    ).first()
+    return {
+        "city": city_payload(db, city),
+        "population": population,
+        "active_24h": int(active_people),
+        "actions_24h": int(actions),
+        "top_action": {"action": top_action[0], "count": int(top_action[1])} if top_action else None,
+        "top_player": {"name": display_player(top_player_row[0]), "influence": top_player_row[1].influence, "rep": top_player_row[1].reputation} if top_player_row else None,
+        "mode": activity_mode_payload(city),
+        "ai": ai_leader_payload(city),
+    }
+
+
+def ai_usage_allowed(db: Session, city: City) -> tuple[bool, int, int]:
+    settings = get_settings()
+    limit = max(0, int(settings.ai_daily_limit_per_chat or 0))
+    if not settings.ai_enabled or limit <= 0:
+        return False, 0, limit
+    since = utcnow() - timedelta(days=1)
+    used = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.city_id == city.id, ActionLog.action == "ai_used", ActionLog.created_at >= since)) or 0
+    return int(used) < limit, int(used), limit
+
+
+def register_ai_usage(db: Session, city: City, kind: str) -> None:
+    log(db, city.id, None, "ai_used", f"AI-ведущий сгенерировал текст: {kind}.")
+    db.flush()
+
+
+def ai_context_payload(db: Session, city: City, kind: str = "газета") -> dict[str, Any]:
+    top = top_players(db, city, limit=5)
+    event = get_active_event(db, city)
+    secret_hint = random.choice(AI_LEADER_FALLBACKS)
+    return {
+        "kind": kind,
+        "city": city_payload(db, city),
+        "activity_mode": city.activity_mode,
+        "top": top,
+        "event": event_payload(event) if event else None,
+        "logs": recent_logs(db, city.id, limit=8),
+        "secret_hint": secret_hint,
+    }
+
+
+def stars_products_payload() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "enabled": bool(settings.stars_enabled),
+        "items": [
+            {"key": key, "name": spec["name"], "stars": int(spec["stars"]), "text": spec["text"]}
+            for key, spec in STARS_PRODUCTS.items()
+        ],
+        "note": "Telegram Stars заготовлены как косметика/ивенты без pay-to-win. Реальные invoice-хендлеры можно подключить следующим шагом.",
+    }
 
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:
