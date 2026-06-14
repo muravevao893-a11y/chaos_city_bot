@@ -87,12 +87,32 @@ def is_group_callback(callback: CallbackQuery) -> bool:
 
 
 async def delete_callback_message(callback: CallbackQuery) -> None:
-    if not isinstance(callback.message, Message):
-        return
+    """Deprecated no-op.
+
+    Older versions deleted the button message before sending a new one.
+    v0.8.1 keeps the chat clean by editing the existing bot message instead.
+    The function stays here so older callback handlers remain simple and safe.
+    """
+    return
+
+
+def is_bot_owned_message(message: Message) -> bool:
+    return bool(message.from_user and getattr(message.from_user, "is_bot", False))
+
+
+async def try_edit_game_message(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
     try:
-        await callback.message.delete()
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup)
+        return True
     except Exception:
-        logger.debug("Could not delete old callback message", exc_info=True)
+        logger.debug("Could not edit managed bot message %s in chat %s", message_id, chat_id, exc_info=True)
+        return False
 
 
 def is_human_user(user: Any | None) -> bool:
@@ -523,15 +543,34 @@ async def send_game_message(message: Message, text: str, reply_markup: InlineKey
         return await message.bot.send_message(message.chat.id, text, reply_markup=reply_markup)
 
     await delete_user_command_message(message)
+
     old_message_id: int | None = None
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         old_message_id = city.last_bot_message_id
-    if old_message_id and old_message_id != message.message_id:
-        try:
-            await message.bot.delete_message(message.chat.id, old_message_id)
-        except Exception:
-            logger.debug("Could not delete previous managed bot message", exc_info=True)
+
+    candidate_message_id: int | None = None
+
+    # Callback buttons come from the bot's own message. Edit that exact message,
+    # so votes/events/panels do not jump around the chat.
+    if is_bot_owned_message(message):
+        candidate_message_id = message.message_id
+
+    # Commands and scheduled events should update the last managed panel if it exists.
+    if not candidate_message_id and old_message_id and old_message_id != message.message_id:
+        candidate_message_id = old_message_id
+
+    if candidate_message_id:
+        edited = await try_edit_game_message(message.bot, message.chat.id, candidate_message_id, text, reply_markup)
+        if edited:
+            with session_scope() as db:
+                city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+                city.last_bot_message_id = candidate_message_id
+            return message
+
+    # Fallback: if Telegram refuses editing, send a fresh managed message.
+    # Do not hard-delete the previous message here: failed edits often happen because
+    # the message is already gone/too old, and forced deletes create extra API noise.
     sent = await message.bot.send_message(message.chat.id, text, reply_markup=reply_markup)
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
@@ -546,10 +585,9 @@ async def send_managed_bot_message(bot: Bot, chat_id: int, text: str, reply_mark
         if city:
             old_message_id = city.last_bot_message_id
     if old_message_id:
-        try:
-            await bot.delete_message(chat_id, old_message_id)
-        except Exception:
-            logger.debug("Could not delete previous managed auto message", exc_info=True)
+        edited = await try_edit_game_message(bot, chat_id, old_message_id, text, reply_markup)
+        if edited:
+            return
     sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
     with session_scope() as db:
         city = db.scalar(select(City).where(City.chat_id == chat_id))
