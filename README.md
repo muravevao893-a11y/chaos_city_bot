@@ -537,3 +537,18 @@ STARS_ENABLED=true
 /admin_chat ID  - карточка города
 /admin_feedback - последние отзывы
 ```
+
+
+## Новые команды v1.6
+
+```text
+/settings              - настройки района для владельца чата
+/toggle steal          - включить/выключить механику
+/daycard               - PNG-карточка итогов дня
+/leagues               - топы по лигам
+/raidaction attack     - вклад в активный рейд
+/raidaction defend     - защита в активном рейде
+/raidaction sabotage   - саботаж в активном рейде
+/admin_disable_chat ID - заморозить город
+/admin_enable_chat ID  - разморозить город
+```

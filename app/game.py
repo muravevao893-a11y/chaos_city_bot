@@ -251,6 +251,22 @@ REFERRAL_MILESTONES: dict[int, dict[str, Any]] = {
     10: {"trophy": "👑 Лорд сарафанки", "treasury": 700, "xp": 500, "style": "👑 Империя приглашений"},
 }
 
+MECHANIC_TOGGLES: dict[str, dict[str, str]] = {
+    "steal": {"name": "💰 кражи", "text": "ограбления казны"},
+    "court": {"name": "⚖️ суды", "text": "суды и подвал"},
+    "duel": {"name": "⚔️ дуэли", "text": "личные дуэли"},
+    "rumor": {"name": "🗣 слухи", "text": "слухи района"},
+    "revolt": {"name": "🔥 бунты", "text": "бунты против власти"},
+    "mentions": {"name": "👤 упоминания", "text": "упоминания жителей в событиях"},
+}
+
+CITY_LEAGUES = [
+    (0, "🥉 Дворовая лига"),
+    (25, "🥈 Районная лига"),
+    (100, "🥇 Городская лига"),
+    (500, "👑 Имперская лига"),
+]
+
 LEGENDARY_EVENTS = [
     "👑 В районе нашли древнюю корону. Никто не понял, чья она, но спорят все.",
     "🛸 НЛО пролетело над мэрией и забрало отчётность. Казна облегчённо выдохнула.",
@@ -869,6 +885,15 @@ def get_city_premium(city: City) -> dict[str, Any]:
             clean[str(key)] = value
         elif isinstance(value, list):
             clean[str(key)] = [str(item)[:80] for item in value[:20]]
+        elif isinstance(value, dict):
+            # Keep small nested option maps like {"settings": {"disabled": [...]}}.
+            nested: dict[str, Any] = {}
+            for n_key, n_value in value.items():
+                if isinstance(n_value, list):
+                    nested[str(n_key)[:40]] = [str(item)[:80] for item in n_value[:30]]
+                elif isinstance(n_value, (str, int, float, bool)) or n_value is None:
+                    nested[str(n_key)[:40]] = n_value
+            clean[str(key)] = nested
     return clean
 
 
@@ -892,6 +917,7 @@ def city_premium_payload(city: City) -> dict[str, Any]:
         "rename_tokens": int(data.get("rename_tokens", 0) or 0),
         "premium_events": int(data.get("premium_events", 0) or 0),
         "season_badge": data.get("season_badge") or "",
+        "settings": get_city_settings(city),
     }
 
 
@@ -939,6 +965,146 @@ def referral_progress_payload(db: Session, city: City) -> dict[str, Any]:
             for threshold, spec in sorted(REFERRAL_MILESTONES.items())
         ],
     }
+
+
+def city_league_by_population(population: int) -> str:
+    league = CITY_LEAGUES[0][1]
+    for threshold, name in CITY_LEAGUES:
+        if population >= threshold:
+            league = name
+    return league
+
+
+def city_league(db: Session, city: City) -> str:
+    return city_league_by_population(city_population(db, city.id))
+
+
+def get_city_settings(city: City) -> dict[str, Any]:
+    premium = get_city_premium(city)
+    settings = premium.get("settings") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    disabled = settings.get("disabled") or []
+    if not isinstance(disabled, list):
+        disabled = []
+    clean_disabled = [str(item) for item in disabled if str(item) in MECHANIC_TOGGLES]
+    return {"disabled": clean_disabled}
+
+
+def set_city_settings(city: City, settings: dict[str, Any]) -> None:
+    premium = get_city_premium(city)
+    disabled = settings.get("disabled") or []
+    premium["settings"] = {"disabled": [str(item) for item in disabled if str(item) in MECHANIC_TOGGLES]}
+    set_city_premium(city, premium)
+
+
+def is_mechanic_enabled(city: City, key: str) -> bool:
+    return key not in set(get_city_settings(city).get("disabled", []))
+
+
+def city_settings_payload(city: City) -> dict[str, Any]:
+    settings = get_city_settings(city)
+    disabled = set(settings.get("disabled", []))
+    return {
+        "items": [
+            {
+                "key": key,
+                "name": spec["name"],
+                "text": spec["text"],
+                "enabled": key not in disabled,
+            }
+            for key, spec in MECHANIC_TOGGLES.items()
+        ]
+    }
+
+
+def toggle_city_mechanic(db: Session, city: City, key: str) -> tuple[bool, str, dict[str, Any]]:
+    if key not in MECHANIC_TOGGLES:
+        return False, "Такого переключателя нет.", city_settings_payload(city)
+    settings = get_city_settings(city)
+    disabled = set(settings.get("disabled", []))
+    if key in disabled:
+        disabled.remove(key)
+        text = f"{MECHANIC_TOGGLES[key]['name']} включены."
+    else:
+        disabled.add(key)
+        text = f"{MECHANIC_TOGGLES[key]['name']} выключены."
+    set_city_settings(city, {"disabled": sorted(disabled)})
+    log(db, city.id, None, "settings", text)
+    db.flush()
+    return True, text, city_settings_payload(city)
+
+
+def active_raid_for_city(db: Session, city: City) -> War | None:
+    return db.scalar(
+        select(War)
+        .where(
+            War.status == "active",
+            (War.attacker_city_id == city.id) | (War.defender_city_id == city.id),
+        )
+        .order_by(desc(War.created_at))
+    )
+
+
+def raid_support_action(db: Session, city: City, player: Player, stance: str) -> tuple[bool, str]:
+    if stance not in {"attack", "defend", "sabotage"}:
+        return False, "Такой подготовки нет."
+    war = active_raid_for_city(db, city)
+    if not war:
+        return False, "Активного рейда нет."
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала стань жителем города."
+    action_key = f"raid_{stance}"
+    allowed, left = city_action_cooldown(db, city, f"{action_key}:{player.id}", 20)
+    if not allowed:
+        return False, f"Подготовка уже была. Ещё {left} мин."
+    effects = {
+        "attack": ("⚔️", "вышел в атаку", 5, 2),
+        "defend": ("🛡", "укрепил оборону", 4, -1),
+        "sabotage": ("🕶", "устроил саботаж", 6, 3),
+    }
+    icon, phrase, xp_bonus, threat_delta = effects[stance]
+    city.xp += xp_bonus
+    city.threat = max(0, int(city.threat or 0) + threat_delta)
+    membership.reputation += 1
+    log(db, city.id, player.id, f"{action_key}:{player.id}", f"{display_player(player)} {phrase} перед рейдом.")
+    log(db, city.id, player.id, action_key, f"{display_player(player)} {phrase} перед рейдом.")
+    db.flush()
+    return True, f"{icon} {display_player(player)} {phrase}. Вклад учтён."
+
+
+def raid_support_count(db: Session, city_id: int) -> int:
+    since = utcnow() - timedelta(hours=24)
+    return int(db.scalar(
+        select(func.count(ActionLog.id))
+        .where(
+            ActionLog.city_id == city_id,
+            ActionLog.created_at >= since,
+            ActionLog.action.in_(["raid_attack", "raid_defend", "raid_sabotage"]),
+        )
+    ) or 0)
+
+
+def top_league_cities(db: Session, league_name: str, limit: int = 10) -> list[dict[str, Any]]:
+    rows = top_cities(db, limit=100)
+    filtered = [item for item in rows if city_league_by_population(int(item.get("population", 0))) == league_name]
+    return filtered[:limit]
+
+
+def admin_set_city_status(db: Session, code_or_id: str, status: str) -> tuple[bool, str]:
+    raw = (code_or_id or "").strip().upper().removeprefix("CITY_")
+    city = None
+    if raw.isdigit():
+        city = db.get(City, int(raw))
+    if not city and raw:
+        city = db.scalar(select(City).where(City.invite_code == raw))
+    if not city:
+        return False, "Город не найден."
+    city.status = status
+    log(db, city.id, None, "admin_status", f"Статус города изменён: {status}.")
+    db.flush()
+    return True, f"{city.name}: статус {status}."
 
 
 def shop_payload(city: City) -> dict[str, Any]:
@@ -1077,7 +1243,23 @@ def create_court_event(db: Session, city: City, target: Player | None = None, fo
     players = _city_players(db, city, limit=12)
     if not players:
         return None
-    target = target or random.choice(players)
+    target = target or (random.choice(players) if is_mechanic_enabled(city, "mentions") else None)
+    if not target:
+        event = CityEvent(
+            city_id=city.id,
+            event_key="court:generic",
+            title="Суд Чатограда",
+            text="В районе спорят о подозрительной дыре в казне.",
+            option_1="Оправдать всех",
+            option_2="Устроить проверку",
+            option_3="Выписать штраф в казну",
+            votes_json="{}",
+        )
+        db.add(event)
+        db.flush()
+        city.last_event_at = utcnow()
+        log(db, city.id, None, "court", "Начался общий суд района.")
+        return event
     membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == target.id))
     if not membership:
         return None
@@ -1419,14 +1601,16 @@ def raid_score_breakdown(db: Session, city: City) -> dict[str, int]:
     alliances = city_alliance_count(db, city.id) * 18
     trophies = len(get_city_trophies(city)) * 7
     threat = max(0, int(city.threat or 0)) * 2
+    support = raid_support_count(db, city.id) * 8
     random_part = random.randint(10, 55)
-    total = base + population + alliances + trophies + threat + random_part
+    total = base + population + alliances + trophies + threat + support + random_part
     return {
         "base": int(base),
         "population": int(population),
         "alliances": int(alliances),
         "trophies": int(trophies),
         "threat": int(threat),
+        "support": int(support),
         "random": int(random_part),
         "total": int(total),
     }
@@ -1998,6 +2182,7 @@ def city_payload(db: Session, city: City) -> dict[str, Any]:
         "title": city.title,
         "name": city.name,
         "rank": city_rank(city),
+        "league": city_league(db, city),
         "level": city.level,
         "xp": city.xp,
         "treasury": city.treasury,

@@ -69,6 +69,13 @@ from app.game import (
     EARLY_CITY_TROPHY,
     should_send_daily_summary,
     FOUNDER_TITLE,
+    secret_role_payload,
+    mission_payload,
+    owner_stats_payload,
+    ai_context_payload,
+    ai_usage_allowed,
+    register_ai_usage,
+    stars_products_payload,
 )
 
 
@@ -443,6 +450,39 @@ class GameLogicTest(unittest.TestCase):
         self.assertEqual(city.level, 1)
         self.assertEqual(city.treasury, 25)
         self.assertIn(EARLY_CITY_TROPHY, get_city_trophies(city))
+
+
+
+    def test_v13_ai_secret_roles_missions_owner_stats_and_stars(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -13001, "AI Chat")
+        owner, _, _ = get_or_create_player(db, 1301, "owner", "Owner")
+        player, _, _ = get_or_create_player(db, 1302, "agent", "Agent")
+        join_city(db, city, owner, is_chat_owner=True)
+        join_city(db, city, player)
+
+        role = secret_role_payload(db, city, player)
+        self.assertIn("name", role)
+        self.assertTrue(role["key"])
+
+        mission = mission_payload(db, city, player, check=False)
+        self.assertTrue(mission["active"])
+        self.assertIn("name", mission)
+
+        work(db, city, player, cooldown_hours=0)
+        mission_checked = mission_payload(db, city, player, check=True)
+        self.assertIn("completed", mission_checked)
+
+        stats = owner_stats_payload(db, city)
+        self.assertIn("active_24h", stats)
+        self.assertIn("ai", stats)
+
+        context = ai_context_payload(db, city, "тест")
+        self.assertIn("city", context)
+        allowed, used, limit = ai_usage_allowed(db, city)
+        self.assertFalse(allowed)
+        register_ai_usage(db, city, "test")
+        self.assertTrue(stars_products_payload()["items"])
 
 
 
