@@ -104,11 +104,15 @@ def _run_light_migrations() -> None:
     _add_column_if_missing("memberships", "civic_title", "civic_title VARCHAR(64)")
     _add_column_if_missing("memberships", "jailed_until", f"jailed_until {_timestamp_ddl()}")
     _add_column_if_missing("memberships", "convictions", "convictions INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("memberships", "last_action_at", f"last_action_at {_timestamp_ddl()}")
     _create_index_if_missing("ix_wars_defender_status_created", "CREATE INDEX ix_wars_defender_status_created ON wars (defender_city_id, status, created_at)")
     _create_index_if_missing("ix_wars_attacker_defender_status", "CREATE INDEX ix_wars_attacker_defender_status ON wars (attacker_city_id, defender_city_id, status)")
     _create_index_if_missing("ix_players_daily", "CREATE INDEX ix_players_daily ON players (last_daily_at)")
     _create_index_if_missing("ix_cities_owner", "CREATE INDEX ix_cities_owner ON cities (owner_telegram_user_id)")
     _create_index_if_missing("ix_players_telegram", "CREATE INDEX ix_players_telegram ON players (telegram_user_id)")
+    _create_index_if_missing("ix_action_logs_action_created", "CREATE INDEX ix_action_logs_action_created ON action_logs (action, created_at)")
+    _create_index_if_missing("ix_duels_city_status_created", "CREATE INDEX ix_duels_city_status_created ON duels (city_id, status, created_at)")
+    _create_index_if_missing("ix_duels_target_status", "CREATE INDEX ix_duels_target_status ON duels (target_player_id, status)")
 
 
 def init_db() -> None:

@@ -28,6 +28,12 @@ class AllianceStatus(StrEnum):
     BROKEN = "broken"
 
 
+class DuelStatus(StrEnum):
+    ACTIVE = "active"
+    FINISHED = "finished"
+    DECLINED = "declined"
+
+
 class City(Base):
     __tablename__ = "cities"
 
@@ -94,6 +100,7 @@ class Membership(Base):
     civic_title: Mapped[str | None] = mapped_column(String(64), nullable=True)
     jailed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     convictions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     city: Mapped[City] = relationship(back_populates="memberships")
@@ -164,6 +171,24 @@ class CityReferral(Base):
     invite_code: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
     reward_given: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Duel(Base):
+    __tablename__ = "duels"
+    __table_args__ = (
+        Index("ix_duels_city_status_created", "city_id", "status", "created_at"),
+        Index("ix_duels_target_status", "target_player_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
+    challenger_player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    target_player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), nullable=False)
+    stake: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=DuelStatus.ACTIVE.value, nullable=False)
+    winner_player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ActionLog(Base):

@@ -17,37 +17,46 @@ from app.db import session_scope
 from app.game import (
     BUILDINGS,
     SHOP_ITEMS,
+    BLACK_MARKET_ITEMS,
     APPOINTABLE_TITLES,
     active_incoming_raids,
     admin_stats,
     appoint_city_official,
     buy_shop_item,
+    buy_black_market_item,
+    black_market_payload,
     build_city_building,
     build_newspaper,
     building_payload,
     city_payload,
     city_population,
+    city_action_cooldown,
     collect_daily_reward,
     create_court_event,
     create_daily_event,
     create_drama_event,
+    create_duel_challenge,
     create_mayor_election,
     create_new_event_if_due,
     create_raid_challenge,
+    create_rumor_event,
     daily_payload,
     display_player,
     event_payload,
     find_city_player_by_username,
     get_or_create_city,
     get_or_create_player,
+    founder_panel_payload,
     help_city_quest,
     join_city,
     maybe_roll_season,
     player_profile,
+    rename_city,
     quest_payload,
     recent_logs,
     resolve_event,
     resolve_raid_challenge,
+    resolve_duel,
     season_payload,
     shop_payload,
     start_war,
@@ -199,6 +208,10 @@ def move_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
+            InlineKeyboardButton(text="🗣 Слух", callback_data="cc:rumor"),
+        ],
+        [
+            InlineKeyboardButton(text="⚔️ Дуэль", callback_data="cc:duel_help"),
             InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"),
         ],
         [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
@@ -224,6 +237,10 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🏗 Постройки", callback_data="cc:buildings"),
             InlineKeyboardButton(text="🛒 Магазин", callback_data="cc:shop"),
+        ],
+        [
+            InlineKeyboardButton(text="🕶 Чёрный рынок", callback_data="cc:black_market"),
+            InlineKeyboardButton(text="👑 Кабинет", callback_data="cc:founder_panel"),
         ],
         [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
@@ -474,6 +491,8 @@ def render_admin_stats(payload: dict[str, Any]) -> str:
         f"Реферальных городов: <b>{payload['referrals_total']}</b>",
         f"Союзов: <b>{payload['alliances_total']}</b>",
         f"Рейдов: активных <b>{payload['raids_active']}</b> · завершённых <b>{payload['raids_finished']}</b>",
+        f"Дуэлей: активных <b>{payload.get('duels_active', 0)}</b> · завершённых <b>{payload.get('duels_finished', 0)}</b>",
+        f"Покупок на чёрном рынке за 24ч: <b>{payload.get('black_market_actions', 0)}</b>",
     ]
     if top_action:
         lines.append(f"Самое частое действие за 24ч: <b>{h(top_action.get('action'))}</b> · {top_action.get('count')}")
@@ -507,6 +526,73 @@ def shop_keyboard() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=str(spec["name"]), callback_data=f"cc:shop_buy:{key}")])
     rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_black_market(payload: dict[str, Any]) -> str:
+    lines = ["🕶 <b>Чёрный рынок</b>", "", "Покупки идут за личные монеты. Всё законно, пока никто не доказал обратное.", ""]
+    for item in payload.get("items", []):
+        lines.append(f"{h(item['name'])} · <b>{item['cost']}</b> монет")
+    return "\n".join(lines)
+
+
+def black_market_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, spec in BLACK_MARKET_ITEMS.items():
+        rows.append([InlineKeyboardButton(text=str(spec["name"]), callback_data=f"cc:black_buy:{key}")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def duel_accept_keyboard(duel_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚔️ Принять дуэль", callback_data=f"cc:duel_accept:{duel_id}")],
+        [InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")],
+    ])
+
+
+def render_duel_help() -> str:
+    return (
+        "⚔️ <b>Дуэли</b>\n\n"
+        "Вызов: <code>/duel @username 20</code>\n"
+        "Ставка списывается только при принятии. Победитель забирает банк.\n"
+        "Дуэли дают репутацию, влияние и повод для локального цирка."
+    )
+
+
+def founder_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🗳 Запустить выборы", callback_data="cc:election"),
+            InlineKeyboardButton(text="⚖️ Запустить суд", callback_data="cc:court"),
+        ],
+        [
+            InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
+            InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
+        ],
+        [InlineKeyboardButton(text="🏷 Переименовать: /renamecity новое имя", callback_data="cc:rename_help")],
+        [InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")],
+    ])
+
+
+def render_founder_panel(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    lines = [
+        f"👑 <b>Кабинет основателя</b>",
+        "",
+        f"Город: <b>{h(city['name'])}</b>",
+        f"Казна: <b>{city['treasury']}</b> · жители <b>{city['population']}</b> · сила <b>{city['power']}</b>",
+        "",
+        "Доступно: выборы, суд, драма, должности, переименование.",
+    ]
+    if payload.get("officials"):
+        lines.append("\n🧩 Должности:")
+        for item in payload["officials"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> — {h(item['title'])}")
+    if payload.get("recent_logs"):
+        lines.append("\n📜 Последнее:")
+        for item in payload["recent_logs"][:3]:
+            lines.append(f"• {h(item['text'])}")
+    return "\n".join(lines)
 
 
 def render_season(payload: dict[str, Any]) -> str:
@@ -931,6 +1017,46 @@ async def cmd_season(message: Message) -> None:
     await perform_season(message)
 
 
+@router.message(Command("market"))
+async def cmd_market(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Чёрный рынок доступен в группе.")
+        return
+    await perform_black_market(message)
+
+
+@router.message(Command("rumor"))
+async def cmd_rumor(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Слухи работают в группе.")
+        return
+    await perform_rumor(message)
+
+
+@router.message(Command("duel"))
+async def cmd_duel(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Дуэли работают в группе.")
+        return
+    await perform_duel_command(message, command.args or "")
+
+
+@router.message(Command("founderpanel"))
+async def cmd_founder_panel(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Кабинет доступен в группе.")
+        return
+    await perform_founder_panel(message, message.from_user)
+
+
+@router.message(Command("renamecity"))
+async def cmd_renamecity(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Переименование доступно в группе.")
+        return
+    await perform_renamecity(message, command.args or "")
+
+
 
 async def perform_more(message: Message, user: Any | None = None) -> None:
     is_founder = False
@@ -968,6 +1094,126 @@ async def perform_shop_buy(message: Message, key: str) -> None:
         treasury = city.treasury
     prefix = "✅" if ok else "⛔"
     await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_shop(payload, treasury), reply_markup=shop_keyboard())
+
+
+async def perform_black_market(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = black_market_payload(city)
+    await send_game_message(message, render_black_market(payload), reply_markup=black_market_keyboard())
+
+
+async def perform_black_market_buy(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload, event = buy_black_market_item(db, city, player, key)
+        event_view = event_payload(event) if event else None
+    prefix = "✅" if ok else "⛔"
+    body = f"{prefix} {h(text)}\n\n" + render_black_market(payload)
+    if event_view:
+        body += "\n\n" + render_event(event_view)
+        await send_game_message(message, body, reply_markup=event_keyboard())
+        return
+    await send_game_message(message, body, reply_markup=black_market_keyboard())
+
+
+async def perform_rumor(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        allowed, left = city_action_cooldown(db, city, "rumor", 30)
+        if not allowed:
+            await send_game_message(message, f"⏳ Слухи уже разогнаны. Ещё примерно <b>{left} мин.</b>", reply_markup=back_keyboard())
+            return
+        event = create_rumor_event(db, city, force=True)
+        payload = event_payload(event) if event else None
+    if not payload:
+        await send_game_message(message, "🗣 Для слухов нужно хотя бы 2 жителя.", reply_markup=back_keyboard())
+        return
+    await send_game_message(message, "🗣 <b>Слух района</b>\n\n" + render_event(payload), reply_markup=event_keyboard())
+
+
+async def perform_duel_help(message: Message) -> None:
+    await send_game_message(message, render_duel_help(), reply_markup=back_keyboard())
+
+
+async def perform_duel_command(message: Message, raw_args: str) -> None:
+    user = message.from_user
+    if not user:
+        return
+    parts = (raw_args or "").split()
+    if not parts:
+        await perform_duel_help(message)
+        return
+    username = parts[0]
+    stake = 10
+    if len(parts) >= 2:
+        try:
+            stake = int(parts[1])
+        except ValueError:
+            stake = 10
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        challenger, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, challenger, is_chat_owner=owner)
+        target = find_city_player_by_username(db, city, username)
+        if not target:
+            await send_game_message(message, "Не нашёл такого жителя. Нужен username вида <code>/duel @user 20</code>.", reply_markup=back_keyboard())
+            return
+        duel, text = create_duel_challenge(db, city, challenger, target, stake)
+    if not duel:
+        await send_game_message(message, f"⛔ {h(text)}", reply_markup=back_keyboard())
+        return
+    await send_game_message(message, f"⚔️ <b>Дуэль</b>\n\n{h(text)}", reply_markup=duel_accept_keyboard(duel.id))
+
+
+async def perform_duel_accept(message: Message, user: Any | None, duel_id: int) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        accepter, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, accepter, is_chat_owner=owner)
+        _duel, result = resolve_duel(db, city, duel_id, accepter)
+        payload = city_payload(db, city)
+    await send_game_message(message, f"⚔️ <b>Итог дуэли</b>\n\n{h(result.text)}\n\nКазна: <b>{payload['treasury']}</b> · уровень города: <b>{payload['level']}</b>", reply_markup=back_keyboard())
+
+
+async def perform_founder_panel(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    if not owner:
+        await send_game_message(message, "👑 Кабинет доступен только владельцу чата.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=True)
+        payload = founder_panel_payload(db, city)
+    await send_game_message(message, render_founder_panel(payload), reply_markup=founder_keyboard())
+
+
+async def perform_renamecity(message: Message, new_name: str) -> None:
+    user = message.from_user
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    if not owner:
+        await send_game_message(message, "🏷 Переименовать город может только владелец чата.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        ok, text = rename_city(db, city, new_name)
+        payload = city_payload(db, city)
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\nГород: <b>{h(payload['name'])}</b>", reply_markup=back_keyboard())
 
 
 async def perform_season(message: Message) -> None:
@@ -1110,6 +1356,10 @@ async def perform_resolve(message: Message) -> None:
 async def perform_drama(message: Message) -> None:
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        allowed, left = city_action_cooldown(db, city, "drama", 30)
+        if not allowed:
+            await send_game_message(message, f"⏳ Драма уже была. Ещё примерно <b>{left} мин.</b>", reply_markup=back_keyboard())
+            return
         event = create_drama_event(db, city, force=True)
         payload = event_payload(event) if event else None
     if not payload:
@@ -1124,6 +1374,10 @@ async def perform_drama(message: Message) -> None:
 async def perform_election(message: Message) -> None:
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        allowed, left = city_action_cooldown(db, city, "election", 60)
+        if not allowed:
+            await send_game_message(message, f"⏳ Выборы недавно запускали. Ещё примерно <b>{left} мин.</b>", reply_markup=back_keyboard())
+            return
         event = create_mayor_election(db, city)
         payload = event_payload(event) if event else None
     if not payload:
@@ -1233,6 +1487,10 @@ async def perform_build(message: Message, key: str) -> None:
 async def perform_court(message: Message) -> None:
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        allowed, left = city_action_cooldown(db, city, "court", 30)
+        if not allowed:
+            await send_game_message(message, f"⏳ Суд недавно был. Ещё примерно <b>{left} мин.</b>", reply_markup=back_keyboard())
+            return
         event = create_court_event(db, city, force=True)
         payload = event_payload(event) if event else None
     if not payload:
@@ -1703,6 +1961,82 @@ async def cb_shop_buy(callback: CallbackQuery) -> None:
     await callback.answer("Покупаем…")
     await delete_callback_message(callback)
     await perform_shop_buy(callback.message, key)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:black_market")
+async def cb_black_market(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Чёрный рынок работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_black_market(callback.message)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data.startswith("cc:black_buy:"))
+async def cb_black_buy(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Покупки работают в группе.", show_alert=True)
+        return
+    key = (callback.data or "").split(":")[-1]
+    await callback.answer("Проверяем карманы…")
+    await delete_callback_message(callback)
+    await perform_black_market_buy(callback.message, callback.from_user, key)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:rumor")
+async def cb_rumor(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Слухи работают в группе.", show_alert=True)
+        return
+    await callback.answer("Запускаем слух…")
+    await delete_callback_message(callback)
+    await perform_rumor(callback.message)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:duel_help")
+async def cb_duel_help(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Дуэли работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_duel_help(callback.message)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data.startswith("cc:duel_accept:"))
+async def cb_duel_accept(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Дуэли работают в группе.", show_alert=True)
+        return
+    try:
+        duel_id = int((callback.data or "").split(":")[-1])
+    except ValueError:
+        await callback.answer("Кривая дуэль.", show_alert=True)
+        return
+    await callback.answer("Дуэль решается…")
+    await delete_callback_message(callback)
+    await perform_duel_accept(callback.message, callback.from_user, duel_id)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:founder_panel")
+async def cb_founder_panel(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Кабинет работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_founder_panel(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:rename_help")
+async def cb_rename_help(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Переименование работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await send_game_message(callback.message, "🏷 <b>Переименование города</b>\n\nКоманда: <code>/renamecity Новое название</code>", reply_markup=founder_keyboard())  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data == "cc:season")

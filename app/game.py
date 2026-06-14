@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, Membership, Player, War, utcnow
+from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, Duel, DuelStatus, Membership, Player, War, utcnow
 
 CITY_PREFIXES = [
     "Неоновый", "Шумный", "Подпольный", "Кибер", "Бешеный", "Сонный", "Золотой", "Пиксельный",
@@ -95,6 +95,30 @@ BUILDINGS: dict[str, dict[str, Any]] = {
 }
 
 SEASON_DAYS = 14
+
+
+BLACK_MARKET_ITEMS: dict[str, dict[str, Any]] = {
+    "fake_rep": {
+        "name": "🪪 Фальшивая репутация",
+        "cost": 35,
+        "text": "репутация стала выше, но район подозревает подвох",
+    },
+    "judge_bribe": {
+        "name": "⚖️ Конверт судье",
+        "cost": 55,
+        "text": "одна судимость растворилась в бюрократии",
+    },
+    "hide_coins": {
+        "name": "🕳 Спрятать монеты",
+        "cost": 45,
+        "text": "монеты спрятаны так хорошо, что часть нашла казна",
+    },
+    "rumor_bomb": {
+        "name": "🗣 Запустить слух",
+        "cost": 25,
+        "text": "район получил новый слух и повод спорить",
+    },
+}
 
 SHOP_ITEMS: dict[str, dict[str, Any]] = {
     "festival": {
@@ -269,6 +293,35 @@ DRAMA_TEMPLATES = [
         "options": ["Готовить рейд", "Отправить разведку", "Притвориться мирными"],
     },
 ]
+
+
+RUMOR_TEMPLATES = [
+    {
+        "title": "Слух района",
+        "text": "Говорят, {a} тайно копит монеты и уже примеряет мэрскую табличку. {b} делает вид, что ничего не знает.",
+        "options": ["Поверить", "Не поверить", "Отправить в суд"],
+    },
+    {
+        "title": "Подвальный шёпот",
+        "text": "Кто-то слышал, что {a} видел тайный бюджет города. {b} требует расследование, но слишком громко.",
+        "options": ["Проверить казну", "Назначить журналиста", "Закрыть тему"],
+    },
+    {
+        "title": "Городской сплетник",
+        "text": "В районе обсуждают, что {a} и {b} мутят союз без согласования с подъездом.",
+        "options": ["Одобрить мутки", "Потребовать отчёт", "Сделать вид, что это дипломатия"],
+    },
+]
+
+
+@dataclass(frozen=True)
+class DuelResult:
+    text: str
+    winner: str | None
+    loser: str | None
+    stake: int
+    challenger_score: int = 0
+    target_score: int = 0
 
 
 @dataclass(frozen=True)
@@ -1306,6 +1359,9 @@ def admin_stats(db: Session) -> dict[str, Any]:
     alliances_total = db.scalar(select(func.count(CityAlliance.id)).where(CityAlliance.status == AllianceStatus.ACTIVE.value)) or 0
     raids_active = db.scalar(select(func.count(War.id)).where(War.status == "active")) or 0
     raids_finished = db.scalar(select(func.count(War.id)).where(War.status == "finished")) or 0
+    duels_active = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.ACTIVE.value)) or 0
+    duels_finished = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.FINISHED.value)) or 0
+    black_market_actions = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "black_market", ActionLog.created_at >= since_day)) or 0
     action_count = func.count(ActionLog.id)
     top_action_row = db.execute(
         select(ActionLog.action, action_count.label("n"))
@@ -1326,6 +1382,9 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "alliances_total": int(alliances_total),
         "raids_active": int(raids_active),
         "raids_finished": int(raids_finished),
+        "duels_active": int(duels_active),
+        "duels_finished": int(duels_finished),
+        "black_market_actions": int(black_market_actions),
         "top_action": {"action": top_action_row[0], "count": int(top_action_row[1])} if top_action_row else None,
         "top_city": top_city[0] if top_city else None,
     }
@@ -1629,6 +1688,208 @@ def build_newspaper(db: Session, city: City) -> dict[str, Any]:
         "hero": hero,
         "suspect": suspect,
     }
+
+
+def city_action_cooldown(db: Session, city: City, action: str, minutes: int) -> tuple[bool, int]:
+    """Return (allowed, minutes_left) for noisy city actions."""
+    since = utcnow() - timedelta(minutes=minutes)
+    row = db.scalar(
+        select(ActionLog)
+        .where(ActionLog.city_id == city.id, ActionLog.action == action, ActionLog.created_at >= since)
+        .order_by(desc(ActionLog.created_at))
+        .limit(1)
+    )
+    if not row:
+        return True, 0
+    created = _aware(row.created_at) or utcnow()
+    left = int(((created + timedelta(minutes=minutes)) - utcnow()).total_seconds() // 60) + 1
+    return False, max(1, left)
+
+
+def is_city_founder(db: Session, city: City, player: Player) -> bool:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    return bool(membership and membership.special_title == FOUNDER_TITLE and city.owner_telegram_user_id == player.telegram_user_id)
+
+
+def black_market_payload(city: City) -> dict[str, Any]:
+    return {"items": [{"key": key, "name": spec["name"], "cost": spec["cost"], "text": spec["text"]} for key, spec in BLACK_MARKET_ITEMS.items()]}
+
+
+def buy_black_market_item(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any], CityEvent | None]:
+    key = (key or "").strip().lower()
+    spec = BLACK_MARKET_ITEMS.get(key)
+    if not spec:
+        return False, "Такого товара на чёрном рынке нет.", black_market_payload(city), None
+
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город. Чёрный рынок чужаков не любит.", black_market_payload(city), None
+
+    cost = int(spec["cost"])
+    if player.coins < cost:
+        return False, f"Нужно {cost} монет. У тебя {player.coins}.", black_market_payload(city), None
+
+    player.coins -= cost
+    city.xp += 5
+    event: CityEvent | None = None
+
+    if key == "fake_rep":
+        membership.reputation += 8
+        membership.influence += 1
+        text = f"{display_player(player)} купил репутацию. Теперь район уважает его чуть подозрительнее."
+    elif key == "judge_bribe":
+        if membership.convictions > 0:
+            membership.convictions -= 1
+            membership.reputation += 2
+            text = f"{display_player(player)} занёс конверт, и одна судимость исчезла из папки."
+        else:
+            membership.reputation += 1
+            text = f"{display_player(player)} занёс конверт заранее. Судимости нет, но связи появились."
+    elif key == "hide_coins":
+        stash = max(5, cost // 3)
+        city.treasury += stash
+        membership.reputation -= 1
+        text = f"{display_player(player)} спрятал монеты. Часть внезапно всплыла в казне: +{stash}."
+    elif key == "rumor_bomb":
+        event = create_rumor_event(db, city, force=True)
+        membership.reputation -= 1
+        text = f"{display_player(player)} запустил слух. Район получил новую тему для подозрений."
+    else:
+        text = f"{display_player(player)} купил: {spec['name']}."
+
+    maybe_level_up(city)
+    log(db, city.id, player.id, "black_market", text)
+    db.flush()
+    return True, text, black_market_payload(city), event
+
+
+def create_rumor_event(db: Session, city: City, force: bool = True) -> CityEvent | None:
+    active = get_active_event(db, city)
+    if active and not force:
+        return active
+    if active and force:
+        active.resolved_at = utcnow()
+        log(db, city.id, None, "event_replaced", f"Старое событие закрыто ради слуха: {active.title}")
+
+    players = _city_players(db, city, limit=10)
+    if len(players) < 2:
+        return None
+    picked = random.sample(players, k=2)
+    template = random.choice(RUMOR_TEMPLATES)
+    event = CityEvent(
+        city_id=city.id,
+        event_key="rumor",
+        title=template["title"],
+        text=template["text"].format(a=display_player(picked[0]), b=display_player(picked[1])),
+        option_1=template["options"][0],
+        option_2=template["options"][1],
+        option_3=template["options"][2],
+        votes_json="{}",
+    )
+    db.add(event)
+    db.flush()
+    city.last_event_at = utcnow()
+    log(db, city.id, None, "rumor", f"Запущен слух: {event.title}")
+    db.flush()
+    return event
+
+
+def create_duel_challenge(db: Session, city: City, challenger: Player, target: Player, stake: int = 10) -> tuple[Duel | None, str]:
+    stake = max(1, min(int(stake or 10), 500))
+    if challenger.id == target.id:
+        return None, "Сам с собой дуэль? Это уже внутренний конфликт, бот тут бессилен."
+    if challenger.coins < stake:
+        return None, f"У тебя нет {stake} монет на ставку."
+    target_membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == target.id))
+    challenger_membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == challenger.id))
+    if not target_membership or not challenger_membership:
+        return None, "Оба участника должны быть жителями города."
+    active = db.scalar(
+        select(Duel)
+        .where(
+            Duel.city_id == city.id,
+            Duel.status == DuelStatus.ACTIVE.value,
+            ((Duel.challenger_player_id == challenger.id) & (Duel.target_player_id == target.id)) |
+            ((Duel.challenger_player_id == target.id) & (Duel.target_player_id == challenger.id)),
+        )
+        .order_by(desc(Duel.created_at))
+    )
+    if active:
+        return active, "Дуэль между этими жителями уже висит. Сначала решите старую, гладиаторы."
+    duel = Duel(city_id=city.id, challenger_player_id=challenger.id, target_player_id=target.id, stake=stake, status=DuelStatus.ACTIVE.value)
+    db.add(duel)
+    city.xp += 3
+    log(db, city.id, challenger.id, "duel_created", f"{display_player(challenger)} вызвал {display_player(target)} на дуэль. Ставка: {stake}.")
+    db.flush()
+    return duel, f"{display_player(challenger)} вызвал {display_player(target)} на дуэль. Ставка: {stake} монет."
+
+
+def resolve_duel(db: Session, city: City, duel_id: int, accepter: Player) -> tuple[Duel | None, DuelResult]:
+    duel = db.get(Duel, duel_id)
+    if not duel or duel.city_id != city.id or duel.status != DuelStatus.ACTIVE.value:
+        return None, DuelResult("Дуэль не найдена или уже закончилась.", None, None, 0)
+    if duel.target_player_id != accepter.id:
+        return duel, DuelResult("Принять дуэль может только тот, кого вызвали. Не лезь под чужой меч, герой.", None, None, int(duel.stake))
+
+    challenger = db.get(Player, duel.challenger_player_id)
+    target = db.get(Player, duel.target_player_id)
+    if not challenger or not target:
+        duel.status = DuelStatus.DECLINED.value
+        duel.resolved_at = utcnow()
+        return duel, DuelResult("Один из дуэлянтов исчез. Победила бюрократия.", None, None, int(duel.stake))
+
+    stake = int(duel.stake or 10)
+    if challenger.coins < stake or target.coins < stake:
+        duel.status = DuelStatus.DECLINED.value
+        duel.resolved_at = utcnow()
+        return duel, DuelResult("У кого-то не хватило монет на ставку. Дуэль распалась как стартап без бюджета.", None, None, stake)
+
+    ch_mem = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == challenger.id))
+    ta_mem = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == target.id))
+    ch_score = challenger.xp + (ch_mem.influence if ch_mem else 0) * 7 + (ch_mem.reputation if ch_mem else 0) * 3 + random.randint(1, 80)
+    ta_score = target.xp + (ta_mem.influence if ta_mem else 0) * 7 + (ta_mem.reputation if ta_mem else 0) * 3 + random.randint(1, 80)
+    winner, loser, win_mem, lose_mem = (challenger, target, ch_mem, ta_mem) if ch_score >= ta_score else (target, challenger, ta_mem, ch_mem)
+
+    challenger.coins -= stake
+    target.coins -= stake
+    winner.coins += stake * 2
+    winner.xp += 12
+    loser.xp += 4
+    if win_mem:
+        win_mem.reputation += 5
+        win_mem.influence += 2
+    if lose_mem:
+        lose_mem.reputation = max(-30, lose_mem.reputation - 2)
+    city.xp += 14
+    maybe_level_up(city)
+
+    duel.status = DuelStatus.FINISHED.value
+    duel.winner_player_id = winner.id
+    duel.resolved_at = utcnow()
+    text = f"{display_player(winner)} победил {display_player(loser)} в дуэли и забрал банк {stake * 2} монет."
+    log(db, city.id, winner.id, "duel_finished", text)
+    db.flush()
+    return duel, DuelResult(text, display_player(winner), display_player(loser), stake, int(ch_score), int(ta_score))
+
+
+def founder_panel_payload(db: Session, city: City) -> dict[str, Any]:
+    return {
+        "city": city_payload(db, city),
+        "officials": city_officials(db, city),
+        "recent_logs": recent_logs(db, city.id, limit=5),
+    }
+
+
+def rename_city(db: Session, city: City, new_name: str) -> tuple[bool, str]:
+    clean = " ".join((new_name or "").strip().split())[:40]
+    if len(clean) < 3:
+        return False, "Название слишком короткое. Район не может называться просто ‘А’."
+    old = city.name
+    city.name = clean
+    city.xp += 5
+    log(db, city.id, None, "rename_city", f"Город переименован: {old} -> {clean}.")
+    db.flush()
+    return True, f"Город переименован: {old} → {clean}."
 
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:
