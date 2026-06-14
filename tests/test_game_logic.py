@@ -35,8 +35,39 @@ from app.game import (
     shop_payload,
     season_payload,
     maybe_roll_season,
+    create_city_alliance,
+    city_alliances,
+    register_city_referral,
+    admin_stats,
+    black_market_payload,
+    buy_black_market_item,
+    create_duel_challenge,
+    create_rumor_event,
+    resolve_duel,
+    rename_city,
+    city_action_cooldown,
     vote_event,
     work,
+    faction_payload,
+    join_faction,
+    inventory_payload,
+    buy_item,
+    use_item,
+    steal_treasury,
+    create_revolt_event,
+    city_history_payload,
+    attempt_escape,
+    achievement_payload,
+    daily_summary_payload,
+    set_city_activity_mode,
+    activity_mode_payload,
+    auto_event_due,
+    create_launch_event,
+    city_launch_payload,
+    reset_city_progress,
+    raid_score_breakdown,
+    EARLY_CITY_TROPHY,
+    should_send_daily_summary,
     FOUNDER_TITLE,
 )
 
@@ -230,6 +261,189 @@ class GameLogicTest(unittest.TestCase):
         self.assertTrue(cities)
         self.assertIn("population", cities[0])
         self.assertIn("rank", cities[0])
+
+    def test_v08_referrals_alliances_and_admin_stats(self):
+        db = make_session()
+        referrer, _ = get_or_create_city(db, -8001, "Referrer Chat")
+        invited, _ = get_or_create_city(db, -8002, "Invited Chat")
+        third, _ = get_or_create_city(db, -8003, "Alliance Chat")
+
+        ok, text = register_city_referral(db, invited, "city_" + referrer.invite_code)
+        self.assertTrue(ok)
+        self.assertIn("Бонус", text)
+        self.assertGreaterEqual(referrer.treasury, 145)
+
+        ok_again, text_again = register_city_referral(db, invited, referrer.invite_code)
+        self.assertFalse(ok_again)
+        self.assertIsNone(text_again)
+
+        ok, ally_text, target = create_city_alliance(db, invited, third.invite_code)
+        self.assertTrue(ok)
+        self.assertIsNotNone(target)
+        self.assertIn("союз", ally_text.lower())
+        alliances = city_alliances(db, invited)
+        self.assertEqual(len(alliances), 1)
+        self.assertEqual(alliances[0]["name"], third.name)
+
+        top = top_cities(db, limit=5)
+        self.assertIn("alliances_count", top[0])
+        self.assertIn("referrals_count", top[0])
+        self.assertIn("trophies_count", top[0])
+
+        stats = admin_stats(db)
+        self.assertGreaterEqual(stats["cities_total"], 3)
+        self.assertEqual(stats["referrals_total"], 1)
+        self.assertEqual(stats["alliances_total"], 1)
+
+    def test_v09_duels_black_market_rumors_and_owner_tools(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -9001, "Market Chat")
+        alice, _, _ = get_or_create_player(db, 91, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 92, "bob", "Bob")
+        join_city(db, city, alice, is_chat_owner=True)
+        join_city(db, city, bob)
+        alice.coins = 200
+        bob.coins = 200
+
+        rumor = create_rumor_event(db, city, force=True)
+        self.assertIsNotNone(rumor)
+        self.assertEqual(rumor.event_key, "rumor")
+        allowed, left = city_action_cooldown(db, city, "rumor", 30)
+        self.assertFalse(allowed)
+        self.assertGreaterEqual(left, 1)
+
+        payload = black_market_payload(city)
+        self.assertTrue(payload["items"])
+        ok, text, _payload, event = buy_black_market_item(db, city, alice, "fake_rep")
+        self.assertTrue(ok)
+        self.assertIn("репутац", text.lower())
+        self.assertIsNone(event)
+
+        duel, duel_text = create_duel_challenge(db, city, alice, bob, 25)
+        self.assertIsNotNone(duel)
+        self.assertIn("дуэль", duel_text.lower())
+        resolved, result = resolve_duel(db, city, duel.id, bob)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.status, "finished")
+        self.assertTrue(result.winner)
+
+        ok, rename_text = rename_city(db, city, "Новый Район")
+        self.assertTrue(ok)
+        self.assertIn("Новый Район", rename_text)
+        self.assertEqual(city.name, "Новый Район")
+
+    def test_v10_factions_items_revolt_steal_history(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -10001, "Faction Chat")
+        alice, _, _ = get_or_create_player(db, 101, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 102, "bob", "Bob")
+        join_city(db, city, alice)
+        join_city(db, city, bob)
+        alice.coins = 300
+        bob.coins = 300
+        city.treasury = 300
+
+        ok, text, factions = join_faction(db, city, alice, "mafia")
+        self.assertTrue(ok)
+        self.assertIn("Мафия", text)
+        self.assertTrue(any(item["count"] >= 1 for item in factions["factions"]))
+        profile = player_profile(db, city, alice)
+        self.assertIn("Мафия", profile["faction"])
+
+        ok, item_text, inventory = buy_item(db, city, alice, "smoke")
+        self.assertTrue(ok)
+        self.assertTrue(inventory["items"])
+        ok, use_text, inventory_after = use_item(db, city, alice, "smoke")
+        self.assertTrue(ok)
+        self.assertIn("задымил", use_text)
+
+        ok, steal_text = steal_treasury(db, city, alice)
+        self.assertTrue(steal_text)
+        self.assertIn("казн", steal_text.lower())
+
+        event, revolt_text = create_revolt_event(db, city, bob, force=True)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_key, "revolt")
+        vote_event(db, city, alice, 1)
+        vote_event(db, city, bob, 1)
+        resolved = resolve_event(db, city)
+        self.assertIn("Бунт", resolved)
+
+        history = city_history_payload(city)
+        self.assertTrue(history["items"])
+
+        # escape path should not crash whether theft jailed the player or not
+        ok, escape_text, _ = attempt_escape(db, city, alice)
+        self.assertTrue(escape_text)
+
+
+    def test_v11_achievements_daily_summary_and_activity_modes(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -11001, "Retention Chat")
+        owner, _, _ = get_or_create_player(db, 111, "owner", "Owner")
+        player, _, _ = get_or_create_player(db, 112, "worker", "Worker")
+        join_city(db, city, owner, is_chat_owner=True)
+        join_city(db, city, player)
+        player.coins = 120
+        work(db, city, player, cooldown_hours=0)
+        achievements = achievement_payload(db, city, player)
+        self.assertGreaterEqual(achievements["owned_count"], 2)
+        self.assertTrue(achievements["items"])
+
+        ok, text, mode = set_city_activity_mode(db, city, "chaos")
+        self.assertTrue(ok)
+        self.assertIn("Хаос", text)
+        self.assertEqual(activity_mode_payload(city)["key"], "chaos")
+        self.assertTrue(auto_event_due(city))
+
+        summary = daily_summary_payload(db, city)
+        self.assertIn("city", summary)
+        self.assertIn("top", summary)
+        self.assertTrue(summary["logs"])
+        self.assertFalse(should_send_daily_summary(city))
+
+    def test_v12_launch_reset_early_trophy_and_better_raids(self):
+        db = make_session()
+        city, created = get_or_create_city(db, -12001, "Launch Chat")
+        self.assertTrue(created)
+        self.assertIn(EARLY_CITY_TROPHY, get_city_trophies(city))
+
+        payload = city_launch_payload(db, city)
+        self.assertIn("city", payload)
+        self.assertEqual(payload["early_trophy"], EARLY_CITY_TROPHY)
+
+        event = create_launch_event(db, city)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event_key, "launch_first_event")
+        self.assertIsNone(create_launch_event(db, city))
+
+        attacker, _ = get_or_create_city(db, -12002, "Raiders")
+        defender, _ = get_or_create_city(db, -12003, "Defenders")
+        alice, _, _ = get_or_create_player(db, 1201, "alice", "Alice")
+        bob, _, _ = get_or_create_player(db, 1202, "bob", "Bob")
+        join_city(db, attacker, alice)
+        join_city(db, defender, bob)
+        attacker.treasury = 400
+        defender.treasury = 400
+        parts = raid_score_breakdown(db, attacker)
+        self.assertIn("total", parts)
+        self.assertGreater(parts["total"], 0)
+        war, _text, _target, created = create_raid_challenge(db, attacker, defender.invite_code)
+        self.assertTrue(created)
+        resolved, raid_text = resolve_raid_challenge(db, defender, war.id)
+        self.assertIsNotNone(resolved)
+        self.assertIn("Счёт", raid_text)
+        self.assertTrue(get_city_trophies(attacker) or get_city_trophies(defender))
+
+        city.treasury = 999
+        city.level = 4
+        ok, reset_text = reset_city_progress(db, city)
+        self.assertTrue(ok)
+        self.assertIn("сброшен", reset_text.lower())
+        self.assertEqual(city.level, 1)
+        self.assertEqual(city.treasury, 25)
+        self.assertIn(EARLY_CITY_TROPHY, get_city_trophies(city))
+
 
 
 if __name__ == "__main__":

@@ -50,6 +50,9 @@ from app.game import (
     create_court_event,
     create_daily_event,
     create_drama_event,
+    create_launch_event,
+    city_launch_payload,
+    reset_city_progress,
     create_duel_challenge,
     create_mayor_election,
     create_new_event_if_due,
@@ -248,7 +251,7 @@ def war_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🤝 Союзы", callback_data="cc:alliances"),
-            InlineKeyboardButton(text="📣 Позвать", callback_data="cc:invite_bot"),
+            InlineKeyboardButton(text="📣 Позвать", callback_data="cc:promo"),
         ],
         [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
     ])
@@ -340,6 +343,63 @@ def render_city_status(payload: dict[str, Any], created: bool = False) -> str:
         f"Режим: <b>{h(payload.get('activity_mode', {}).get('name', '⚖️ Нормально'))}</b>\n"
         f"Код рейдов: <code>{h(payload['invite_code'])}</code>"
     )
+
+
+def render_launch_show(payload: dict[str, Any], founder_name: str | None = None, referral_line: str = "") -> str:
+    city = payload["city"]
+    trophy = payload.get("early_trophy")
+    lines = [
+        "🏙 <b>Чат основан.</b>",
+        "",
+        f"Название: <b>{h(city['name'])}</b>",
+        f"Статус: <b>{h(city.get('rank', 'Подъезд'))}</b>",
+        f"Казна: <b>{city['treasury']}</b> · жители: <b>{city['population']}</b> · угроза: <b>{city['threat']}</b>",
+    ]
+    if founder_name:
+        lines.append(f"👑 Основатель района: <b>{h(founder_name)}</b>")
+    else:
+        lines.append("👑 Владелец чата может забрать титул основателя.")
+    if trophy:
+        lines.append(f"🏛 Ранний трофей: <b>{h(trophy)}</b>")
+    lines.extend([
+        "",
+        "Первый скандал уже на подходе. Район делает вид, что готов.",
+        f"Код рейдов: <code>{h(city['invite_code'])}</code>",
+    ])
+    if referral_line:
+        lines.append("\n" + referral_line.strip())
+    return "\n".join(lines)
+
+
+def render_promo_text(bot_username: str | None, city_code: str | None = None) -> str:
+    if bot_username and city_code:
+        link = f"https://t.me/{bot_username}?startgroup=city_{city_code}"
+    elif bot_username:
+        link = f"https://t.me/{bot_username}?startgroup=true"
+    else:
+        link = "@chatogradGameBot"
+    return (
+        "📣 <b>Позвать Чатоград</b>\n\n"
+        "Добавь бота в свой чат и преврати группу в район: жители, казна, суды, бунты, фракции, рейды и трофеи.\n\n"
+        "Первые города получают редкий трофей раннего запуска.\n\n"
+        f"{h(link)}"
+    )
+
+
+def promo_keyboard(bot_username: str | None, city_code: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if bot_username:
+        suffix = f"city_{city_code}" if city_code else "true"
+        rows.append([InlineKeyboardButton(text="➕ Добавить в группу", url=f"https://t.me/{bot_username}?startgroup={suffix}")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def reset_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, снести район", callback_data="cc:reset_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cc:founder_panel")],
+    ])
 
 
 def render_event(payload: dict[str, Any]) -> str:
@@ -657,7 +717,11 @@ def founder_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
+            InlineKeyboardButton(text="🚨 Первый ивент", callback_data="cc:first_event"),
+        ],
+        [
             InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
+            InlineKeyboardButton(text="📣 Промо", callback_data="cc:promo"),
         ],
         [InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary")],
         [
@@ -666,6 +730,7 @@ def founder_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔥 Хаос", callback_data="cc:mode:chaos"),
         ],
         [InlineKeyboardButton(text="🏷 Переименовать: /renamecity новое имя", callback_data="cc:rename_help")],
+        [InlineKeyboardButton(text="🧹 Сбросить район", callback_data="cc:reset_city")],
         [InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")],
     ])
 
@@ -678,8 +743,9 @@ def render_founder_panel(payload: dict[str, Any]) -> str:
         f"Город: <b>{h(city['name'])}</b>",
         f"Казна: <b>{city['treasury']}</b> · жители <b>{city['population']}</b> · сила <b>{city['power']}</b>",
         f"Режим: <b>{h(payload.get('activity_mode', {}).get('name', '⚖️ Нормально'))}</b>",
+        f"AI-ведущий: <b>{h(payload.get('ai_leader', {}).get('status', 'выключен'))}</b>",
         "",
-        "Доступно: выборы, суд, драма, должности, итоги дня, режим активности, переименование.",
+        "Доступно: выборы, суд, драма, первый ивент, должности, итоги, промо, режим, переименование, сброс.",
     ]
     if payload.get("officials"):
         lines.append("\n🧩 Должности:")
@@ -860,6 +926,7 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
         owner = await is_user_chat_owner(message.bot, message.chat.id, user.id if user else None)
         founder_line = ""
         referral_line = ""
+        player = None
         with session_scope() as db:
             city, created = get_or_create_city(db, message.chat.id, message.chat.title)
             if args.startswith("city_") or args.startswith("C"):
@@ -874,10 +941,27 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
                 if is_founder:
                     founder_line = f"\n👑 Основатель района: <b>{h(display_player(player))}</b>"
             payload = city_payload(db, city)
-        status = "основан" if created else "уже существует"
-        await send_game_message(message, 
+            launch = None
+            event_view = None
+            founder_name = None
+            if created:
+                event = create_launch_event(db, city, force=False)
+                launch = city_launch_payload(db, city)
+                event_view = event_payload(event) if event else None
+                founder_name = display_player(player) if is_founder and player else None
+
+        if launch:
+            text = render_launch_show(launch, founder_name=founder_name, referral_line=referral_line)
+            if event_view:
+                text += "\n\n" + render_event(event_view)
+                await send_game_message(message, text, reply_markup=event_keyboard())
+            else:
+                await send_game_message(message, text, reply_markup=city_panel_keyboard(is_member=True, is_founder=is_founder))
+            return
+
+        await send_game_message(message,
             f"🏙 <b>{BRAND} активирован.</b>\n\n"
-            f"Город <b>{h(payload['name'])}</b> {status}.\n"
+            f"Город <b>{h(payload['name'])}</b> уже существует.\n"
             f"Уровень: <b>{payload['level']}</b> · Казна: <b>{payload['treasury']}</b> · Жители: <b>{payload['population']}</b>{founder_line}{referral_line}\n"
             f"Код рейдов: <code>{h(payload['invite_code'])}</code>",
             reply_markup=city_panel_keyboard(is_member=True, is_founder=is_founder),
@@ -894,7 +978,7 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot) -> None:
     reward_line = f"\n\n{h(reward)}" if reward else ""
     ref_link = f"https://t.me/{bot_username}?start={player.ref_code}" if bot_username else player.ref_code
 
-    await send_game_message(message, 
+    await send_game_message(message,
         f"🏙 <b>{BRAND}</b>\n\n"
         f"Профиль {intro}: <b>{h(display_player(player))}</b>\n"
         f"Роль: <b>{h(player.role)}</b>\n"
@@ -1302,6 +1386,73 @@ async def cmd_history(message: Message) -> None:
         await send_game_message(message, "Летопись доступна в группе.")
         return
     await perform_history(message)
+
+
+@router.message(Command("promo"))
+async def cmd_promo(message: Message, bot: Bot) -> None:
+    await perform_promo(message, bot)
+
+
+@router.message(Command("resetcity"))
+async def cmd_resetcity(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Сброс доступен в группе.")
+        return
+    await perform_resetcity_prompt(message, message.from_user)
+
+
+@router.message(Command("firstevent"))
+async def cmd_firstevent(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Первый ивент доступен в группе.")
+        return
+    await perform_first_event(message, force=True)
+
+
+async def perform_promo(message: Message, bot: Bot | None = None) -> None:
+    bot = bot or message.bot
+    bot_username = await get_bot_username(bot)
+    city_code = None
+    if is_group(message):
+        with session_scope() as db:
+            city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+            city_code = city.invite_code
+    await send_game_message(message, render_promo_text(bot_username, city_code), reply_markup=promo_keyboard(bot_username, city_code))
+
+
+async def perform_first_event(message: Message, force: bool = False) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        event = create_launch_event(db, city, force=force)
+        payload = event_payload(event) if event else None
+    if payload:
+        await send_game_message(message, "🚨 <b>Первый скандал района</b>\n\n" + render_event(payload), reply_markup=event_keyboard())
+    else:
+        await send_game_message(message, "Первый ивент уже был. Район не даст переписать историю так просто.", reply_markup=back_keyboard())
+
+
+async def perform_resetcity_prompt(message: Message, user: Any | None) -> None:
+    if not user or not await is_user_chat_owner(message.bot, message.chat.id, user.id):
+        await send_game_message(message, "🧹 Сбросить город может только владелец чата.", reply_markup=back_keyboard())
+        return
+    await send_game_message(
+        message,
+        "🧹 <b>Снести район?</b>\n\n"
+        "Жители останутся, но казна, постройки, фракции, предметы, судимости, активные события и прогресс сбросятся.\n"
+        "Трофей раннего запуска сохранится.",
+        reply_markup=reset_confirm_keyboard(),
+    )
+
+
+async def perform_resetcity_confirm(message: Message, user: Any | None) -> None:
+    if not user or not await is_user_chat_owner(message.bot, message.chat.id, user.id):
+        await send_game_message(message, "🧹 Только владелец чата может снести район.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        _ok, text = reset_city_progress(db, city)
+        payload = city_payload(db, city)
+    await send_game_message(message, f"✅ {h(text)}\n\n" + render_city_status(payload, created=True), reply_markup=city_panel_keyboard())
 
 
 async def perform_more(message: Message, user: Any | None = None) -> None:
@@ -2568,6 +2719,42 @@ async def cb_history(callback: CallbackQuery) -> None:
     await delete_callback_message(callback)
     await perform_history(callback.message)  # type: ignore[arg-type]
 
+@router.callback_query(F.data == "cc:promo")
+async def cb_promo(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_promo(callback.message, callback.bot)
+
+
+@router.callback_query(F.data == "cc:first_event")
+async def cb_first_event(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Первый ивент работает в группе.", show_alert=True)
+        return
+    await callback.answer("Запускаем первый скандал…")
+    await perform_first_event(callback.message, force=True)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:reset_city")
+async def cb_reset_city(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Сброс работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_resetcity_prompt(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:reset_confirm")
+async def cb_reset_confirm(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Сброс работает в группе.", show_alert=True)
+        return
+    await callback.answer("Сносим район…")
+    await perform_resetcity_confirm(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
 @router.callback_query(F.data == "cc:global_top")
 async def cb_global_top(callback: CallbackQuery) -> None:
     if not isinstance(callback.message, Message):
@@ -2592,11 +2779,17 @@ async def on_new_members(message: Message) -> None:
                 player, _, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
                 join_city(db, city, player, is_chat_owner=owner)
             payload = city_payload(db, city)
-        await send_game_message(message, 
-            f"🏙 <b>{BRAND} прибыл.</b>\n\n"
-            f"Город создан: <b>{h(payload['name'])}</b>",
-            reply_markup=back_keyboard(),
-        )
+        with session_scope() as db:
+            city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+            event = create_launch_event(db, city, force=False)
+            launch = city_launch_payload(db, city)
+            event_view = event_payload(event) if event else None
+        text = render_launch_show(launch)
+        if event_view:
+            text += "\n\n" + render_event(event_view)
+            await send_game_message(message, text, reply_markup=event_keyboard())
+        else:
+            await send_game_message(message, text, reply_markup=city_panel_keyboard())
         return
 
     new_people = [member for member in message.new_chat_members if not member.is_bot]

@@ -122,9 +122,10 @@ def _run_light_migrations() -> None:
     _create_index_if_missing("ix_memberships_city_reputation", "CREATE INDEX ix_memberships_city_reputation ON memberships (city_id, reputation)")
     _create_index_if_missing("ix_membership_faction", "CREATE INDEX ix_membership_faction ON memberships (city_id, faction)")
     _create_index_if_missing("ix_membership_steal", "CREATE INDEX ix_membership_steal ON memberships (city_id, last_steal_at)")
-    _create_index_if_missing("ix_action_logs_action_created", "CREATE INDEX ix_action_logs_action_created ON action_logs (action, created_at)")
     _create_index_if_missing("ix_duels_city_status_created", "CREATE INDEX ix_duels_city_status_created ON duels (city_id, status, created_at)")
     _create_index_if_missing("ix_duels_target_status", "CREATE INDEX ix_duels_target_status ON duels (target_player_id, status)")
+    _create_index_if_missing("ix_city_events_key_created", "CREATE INDEX ix_city_events_key_created ON city_events (city_id, event_key, created_at)")
+    _create_index_if_missing("ix_cities_created", "CREATE INDEX ix_cities_created ON cities (created_at)")
 
 
 def init_db() -> None:

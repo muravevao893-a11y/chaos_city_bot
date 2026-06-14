@@ -166,6 +166,21 @@ LEGENDARY_EVENTS = [
     "🔥 Народ случайно устроил праздник вместо собрания. Эффективность выросла.",
 ]
 
+EARLY_CITY_LIMIT = 100
+EARLY_CITY_TROPHY = "🏛 Основатели Чатограда"
+SHAME_TROPHIES = [
+    "🤡 Позорная табличка рейда",
+    "🧦 Носок проигранной войны",
+    "📉 Грамота за стратегическое падение",
+    "🥄 Деревянная медаль обороны",
+]
+
+AI_LEADER_FALLBACKS = [
+    "район сегодня шумит так, будто у казны появился личный телохранитель",
+    "жители делают вид, что всё под контролем, но подвал уже забронирован",
+    "мэрия уверяет, что хаоса нет, хотя хаос уже записался в очередь",
+]
+
 SHOP_ITEMS: dict[str, dict[str, Any]] = {
     "festival": {
         "name": "🎉 Районный праздник",
@@ -470,9 +485,57 @@ def get_or_create_city(db: Session, chat_id: int, title: str | None) -> tuple[Ci
     )
     db.add(city)
     db.flush()
+    grant_early_city_trophy(db, city)
     log(db, city.id, None, "city_created", f"Город {city.name} основан.")
     add_city_history(city, f"Город {city.name} основан.", "🏙")
     return city, True
+
+
+def grant_early_city_trophy(db: Session, city: City) -> bool:
+    """Give a permanent launch trophy to the first public wave of cities."""
+    total = db.scalar(select(func.count(City.id))) or 0
+    if int(total) > EARLY_CITY_LIMIT:
+        return False
+    trophies = get_city_trophies(city)
+    if EARLY_CITY_TROPHY in trophies:
+        return False
+    award_trophy(city, EARLY_CITY_TROPHY)
+    city.xp += 20
+    city.treasury += 25
+    log(db, city.id, None, "early_city", f"Город получил трофей раннего запуска: {EARLY_CITY_TROPHY}.")
+    return True
+
+
+def create_launch_event(db: Session, city: City, force: bool = False) -> CityEvent | None:
+    """First wow-event for a newly activated group."""
+    if not force:
+        already = db.scalar(
+            select(CityEvent).where(CityEvent.city_id == city.id, CityEvent.event_key == "launch_first_event")
+        )
+        if already:
+            return None
+    active = get_active_event(db, city)
+    if active and not force:
+        return active
+    if active and force:
+        active.resolved_at = utcnow()
+    event = CityEvent(
+        city_id=city.id,
+        event_key="launch_first_event",
+        title="Первый скандал района",
+        text="Город только появился, а кто-то уже трогал казну. Казна маленькая, но подозрения большие.",
+        option_1="Устроить первый суд",
+        option_2="Назначить временного виновного",
+        option_3="Сделать вид, что это традиция",
+        votes_json="{}",
+    )
+    db.add(event)
+    city.last_event_at = utcnow()
+    city.xp += 8
+    log(db, city.id, None, "launch_event", "Запущен первый скандал района.")
+    add_city_history(city, "Первый скандал района запущен после основания.", "🚨")
+    db.flush()
+    return event
 
 
 def join_city(db: Session, city: City, player: Player, is_chat_owner: bool = False) -> tuple[Membership, bool]:
@@ -1158,6 +1221,26 @@ def active_incoming_raids(db: Session, defender: City, limit: int = 5) -> list[d
     return result
 
 
+def raid_score_breakdown(db: Session, city: City) -> dict[str, int]:
+    """Readable raid score parts, cheap enough for buttons and tests."""
+    base = city_power(db, city.id)
+    population = city_population(db, city.id) * 4
+    alliances = city_alliance_count(db, city.id) * 18
+    trophies = len(get_city_trophies(city)) * 7
+    threat = max(0, int(city.threat or 0)) * 2
+    random_part = random.randint(10, 55)
+    total = base + population + alliances + trophies + threat + random_part
+    return {
+        "base": int(base),
+        "population": int(population),
+        "alliances": int(alliances),
+        "trophies": int(trophies),
+        "threat": int(threat),
+        "random": int(random_part),
+        "total": int(total),
+    }
+
+
 def resolve_raid_challenge(db: Session, defender: City, war_id: int) -> tuple[War | None, str]:
     war = db.get(War, war_id)
     if not war or war.status != "active" or war.defender_city_id != defender.id:
@@ -1169,8 +1252,10 @@ def resolve_raid_challenge(db: Session, defender: City, war_id: int) -> tuple[Wa
         war.finished_at = utcnow()
         return war, "Город-агрессор исчез. Победа бюрократией."
 
-    attacker_score = city_power(db, attacker.id) + city_population(db, attacker.id) * random.randint(1, 4) + random.randint(5, 45)
-    defender_score = city_power(db, defender.id) + city_population(db, defender.id) * random.randint(1, 4) + random.randint(5, 45)
+    attacker_parts = raid_score_breakdown(db, attacker)
+    defender_parts = raid_score_breakdown(db, defender)
+    attacker_score = attacker_parts["total"]
+    defender_score = defender_parts["total"]
     war.attacker_score = attacker_score
     war.defender_score = defender_score
     war.status = "finished"
@@ -1180,23 +1265,35 @@ def resolve_raid_challenge(db: Session, defender: City, war_id: int) -> tuple[Wa
         prize = max(12, int(defender.treasury * 0.18))
         defender.treasury = max(0, defender.treasury - prize)
         attacker.treasury += prize
-        attacker.xp += 35
-        defender.xp += 10
+        attacker.xp += 45
+        defender.xp += 14
         trophy = award_trophy(attacker)
-        text = f"{attacker.name} победил {defender.name}, забрал {prize} монет и трофей: {trophy}."
+        shame = award_trophy(defender, random.choice(SHAME_TROPHIES))
+        text = (
+            f"{attacker.name} победил {defender.name}. Счёт {attacker_score}:{defender_score}. "
+            f"Добыча: {prize} монет. Трофей победителя: {trophy}. "
+            f"Проигравшим досталось: {shame}."
+        )
     else:
         prize = max(10, int(attacker.treasury * 0.12))
         attacker.treasury = max(0, attacker.treasury - prize)
         defender.treasury += prize
-        defender.xp += 35
-        attacker.xp += 10
+        defender.xp += 45
+        attacker.xp += 14
         trophy = award_trophy(defender)
-        text = f"{defender.name} отбился от {attacker.name}, получил {prize} монет и трофей: {trophy}."
+        shame = award_trophy(attacker, random.choice(SHAME_TROPHIES))
+        text = (
+            f"{defender.name} отбился от {attacker.name}. Счёт {defender_score}:{attacker_score}. "
+            f"Компенсация: {prize} монет. Трофей обороны: {trophy}. "
+            f"Атакующим досталось: {shame}."
+        )
 
     maybe_level_up(attacker)
     maybe_level_up(defender)
     log(db, attacker.id, None, "raid_finished", text)
     log(db, defender.id, None, "raid_finished", text)
+    add_city_history(attacker, text, "⚔️")
+    add_city_history(defender, text, "⚔️")
     db.flush()
     return war, text
 
@@ -1975,6 +2072,7 @@ def founder_panel_payload(db: Session, city: City) -> dict[str, Any]:
         "officials": city_officials(db, city),
         "recent_logs": recent_logs(db, city.id, limit=5),
         "activity_mode": activity_mode_payload(city),
+        "ai_leader": ai_leader_payload(city),
     }
 
 
@@ -1988,6 +2086,77 @@ def rename_city(db: Session, city: City, new_name: str) -> tuple[bool, str]:
     log(db, city.id, None, "rename_city", f"Город переименован: {old} -> {clean}.")
     db.flush()
     return True, f"Город переименован: {old} → {clean}."
+
+
+def reset_city_progress(db: Session, city: City) -> tuple[bool, str]:
+    """Soft reset for chat owner: keep citizens, owner and invite code, wipe game progress."""
+    # Finish active events and raids connected with the city.
+    for event in db.scalars(select(CityEvent).where(CityEvent.city_id == city.id, CityEvent.resolved_at.is_(None))).all():
+        event.resolved_at = utcnow()
+    for war in db.scalars(
+        select(War).where(
+            War.status == "active",
+            (War.attacker_city_id == city.id) | (War.defender_city_id == city.id),
+        )
+    ).all():
+        war.status = "finished"
+        war.finished_at = utcnow()
+
+    city.level = 1
+    city.xp = 0
+    city.treasury = 25
+    city.threat = random.randint(3, 11)
+    city.buildings_json = "{}"
+    city.shop_json = "{}"
+    city.history_json = "[]"
+    city.season_number = 1
+    city.season_started_at = utcnow()
+    city.last_daily_summary_at = None
+    city.last_event_at = None
+    city.activity_mode = "normal"
+    # Keep launch/early trophies so first-wave cities don't lose their badge.
+    keep = [item for item in get_city_trophies(city) if item == EARLY_CITY_TROPHY]
+    set_city_trophies(city, keep)
+
+    memberships = db.scalars(select(Membership).where(Membership.city_id == city.id)).all()
+    for membership in memberships:
+        membership.influence = 12 if membership.special_title == FOUNDER_TITLE else 1
+        membership.reputation = 15 if membership.special_title == FOUNDER_TITLE else 0
+        membership.civic_title = None
+        membership.faction = None
+        membership.inventory_json = "{}"
+        membership.achievements_json = "[]"
+        membership.jailed_until = None
+        membership.convictions = 0
+        membership.last_steal_at = None
+        membership.last_revolt_at = None
+        membership.last_action_at = None
+
+    add_city_history(city, "Город был мягко сброшен основателем. Старый хаос ушёл в архив мусорки.", "🧹")
+    log(db, city.id, None, "reset_city", "Город сброшен основателем.")
+    db.flush()
+    return True, "Город сброшен. Жители остались, прогресс начался заново."
+
+
+def ai_leader_payload(city: City) -> dict[str, Any]:
+    settings = get_settings()
+    enabled = bool(settings.ai_enabled)
+    return {
+        "enabled": enabled,
+        "provider": settings.ai_provider,
+        "model": settings.ai_model or "не выбран",
+        "daily_limit": settings.ai_daily_limit_per_chat,
+        "fallback_line": random.choice(AI_LEADER_FALLBACKS),
+        "status": "включён" if enabled else "выключен",
+    }
+
+
+def city_launch_payload(db: Session, city: City) -> dict[str, Any]:
+    return {
+        "city": city_payload(db, city),
+        "early_trophy": EARLY_CITY_TROPHY if EARLY_CITY_TROPHY in get_city_trophies(city) else None,
+        "first_event_available": get_active_event(db, city) is None,
+    }
 
 
 # ---- v1.0: factions, revolts, thefts, items, history ----
