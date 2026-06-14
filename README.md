@@ -552,3 +552,17 @@ STARS_ENABLED=true
 /admin_disable_chat ID - заморозить город
 /admin_enable_chat ID  - разморозить город
 ```
+
+
+## Новые команды v1.7
+
+```text
+/owner              - owner-центр владельца чата
+/store              - магазин и инвентарь города
+/promo_pack         - готовый промо-пост
+/weekdigest         - недельная сводка города
+/admin_growth       - аналитика роста
+/admin_retention    - удержание
+/admin_payments     - платежи Stars
+/admin_dead_chats   - тихие чаты
+```

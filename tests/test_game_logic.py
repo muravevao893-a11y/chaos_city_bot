@@ -76,6 +76,16 @@ from app.game import (
     ai_usage_allowed,
     register_ai_usage,
     stars_products_payload,
+    owner_center_payload,
+    city_store_payload,
+    growth_analytics_payload,
+    retention_payload,
+    payments_analytics_payload,
+    dead_chats_payload,
+    promo_pack_payload,
+    weekly_digest_payload,
+    use_city_store_item,
+    EARLY_1000_CITY_TROPHY,
 )
 
 
@@ -484,6 +494,32 @@ class GameLogicTest(unittest.TestCase):
         register_ai_usage(db, city, "test")
         self.assertTrue(stars_products_payload()["items"])
 
+
+
+    def test_v17_owner_analytics_store_and_retention(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -1701, "Growth Chat")
+        player, _, _ = get_or_create_player(db, 1701, "owner", "Owner")
+        join_city(db, city, player, is_chat_owner=True)
+        work(db, city, player, cooldown_hours=0)
+
+        self.assertIn(EARLY_1000_CITY_TROPHY, get_city_trophies(city))
+        owner = owner_center_payload(db, city)
+        self.assertIn("store", owner)
+        self.assertIn("referral", owner)
+
+        store = city_store_payload(db, city)
+        self.assertIn("premium", store)
+        ok, text, _, _ = use_city_store_item(db, city, player, "ai_newspaper")
+        self.assertFalse(ok)
+        self.assertIn("AI-газет", text)
+
+        self.assertGreaterEqual(growth_analytics_payload(db)["cities_total"], 1)
+        self.assertGreaterEqual(retention_payload(db)["cities_total"], 1)
+        self.assertIn("stars_total", payments_analytics_payload(db))
+        self.assertIsInstance(dead_chats_payload(db), list)
+        self.assertIn("text", promo_pack_payload(db, city))
+        self.assertIn("actions", weekly_digest_payload(db, city))
 
 
 if __name__ == "__main__":

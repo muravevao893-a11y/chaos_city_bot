@@ -277,6 +277,8 @@ LEGENDARY_EVENTS = [
 
 EARLY_CITY_LIMIT = 100
 EARLY_CITY_TROPHY = "🏛 Основатели Чатограда"
+EARLY_1000_CITY_LIMIT = 1000
+EARLY_1000_CITY_TROPHY = "🌟 Первые 1000 городов"
 SHAME_TROPHIES = [
     "🤡 Позорная табличка рейда",
     "🧦 Носок проигранной войны",
@@ -601,18 +603,23 @@ def get_or_create_city(db: Session, chat_id: int, title: str | None) -> tuple[Ci
 
 
 def grant_early_city_trophy(db: Session, city: City) -> bool:
-    """Give a permanent launch trophy to the first public wave of cities."""
-    total = db.scalar(select(func.count(City.id))) or 0
-    if int(total) > EARLY_CITY_LIMIT:
-        return False
+    """Give permanent launch trophies to the first public waves of cities."""
+    total = int(db.scalar(select(func.count(City.id))) or 0)
     trophies = get_city_trophies(city)
-    if EARLY_CITY_TROPHY in trophies:
-        return False
-    award_trophy(city, EARLY_CITY_TROPHY)
-    city.xp += 20
-    city.treasury += 25
-    log(db, city.id, None, "early_city", f"Город получил трофей раннего запуска: {EARLY_CITY_TROPHY}.")
-    return True
+    changed = False
+    if total <= EARLY_CITY_LIMIT and EARLY_CITY_TROPHY not in trophies:
+        award_trophy(city, EARLY_CITY_TROPHY)
+        city.xp += 20
+        city.treasury += 25
+        log(db, city.id, None, "early_city", f"Город получил трофей раннего запуска: {EARLY_CITY_TROPHY}.")
+        changed = True
+    if total <= EARLY_1000_CITY_LIMIT and EARLY_1000_CITY_TROPHY not in get_city_trophies(city):
+        award_trophy(city, EARLY_1000_CITY_TROPHY)
+        city.xp += 15
+        city.treasury += 15
+        log(db, city.id, None, "early_1000_city", f"Город получил статус: {EARLY_1000_CITY_TROPHY}.")
+        changed = True
+    return changed
 
 
 def create_launch_event(db: Session, city: City, force: bool = False) -> CityEvent | None:
@@ -2630,7 +2637,7 @@ def reset_city_progress(db: Session, city: City) -> tuple[bool, str]:
     city.last_event_at = None
     city.activity_mode = "normal"
     # Keep launch/early trophies so first-wave cities don't lose their badge.
-    keep = [item for item in get_city_trophies(city) if item == EARLY_CITY_TROPHY]
+    keep = [item for item in get_city_trophies(city) if item in {EARLY_CITY_TROPHY, EARLY_1000_CITY_TROPHY}]
     set_city_trophies(city, keep)
 
     memberships = db.scalars(select(Membership).where(Membership.city_id == city.id)).all()
@@ -3524,6 +3531,215 @@ def apply_stars_purchase(
     db.flush()
     return True, text
 
+
+
+
+def _action_count_between(db: Session, start: datetime, end: datetime | None = None) -> int:
+    query = select(func.count(ActionLog.id)).where(ActionLog.created_at >= start)
+    if end:
+        query = query.where(ActionLog.created_at < end)
+    return int(db.scalar(query) or 0)
+
+
+def _active_cities_since(db: Session, since: datetime) -> int:
+    return int(db.scalar(
+        select(func.count(func.distinct(ActionLog.city_id))).where(ActionLog.city_id.is_not(None), ActionLog.created_at >= since)
+    ) or 0)
+
+
+def growth_analytics_payload(db: Session) -> dict[str, Any]:
+    now = utcnow()
+    day = now - timedelta(days=1)
+    week = now - timedelta(days=7)
+    return {
+        "cities_total": int(db.scalar(select(func.count(City.id))) or 0),
+        "players_total": int(db.scalar(select(func.count(Player.id))) or 0),
+        "new_cities_day": int(db.scalar(select(func.count(City.id)).where(City.created_at >= day)) or 0),
+        "new_cities_week": int(db.scalar(select(func.count(City.id)).where(City.created_at >= week)) or 0),
+        "active_cities_day": _active_cities_since(db, day),
+        "active_cities_week": _active_cities_since(db, week),
+        "actions_day": _action_count_between(db, day),
+        "actions_week": _action_count_between(db, week),
+        "top_week": top_week_cities(db, limit=5),
+    }
+
+
+def retention_payload(db: Session) -> dict[str, Any]:
+    now = utcnow()
+    day = now - timedelta(days=1)
+    week = now - timedelta(days=7)
+    month = now - timedelta(days=30)
+    cities_total = int(db.scalar(select(func.count(City.id))) or 0)
+    active_day = _active_cities_since(db, day)
+    active_week = _active_cities_since(db, week)
+    active_month = _active_cities_since(db, month)
+    dead = dead_chats_payload(db, days=7, limit=10)
+    return {
+        "cities_total": cities_total,
+        "active_day": active_day,
+        "active_week": active_week,
+        "active_month": active_month,
+        "quiet_week": max(0, cities_total - active_week),
+        "dead_sample": dead,
+    }
+
+
+def payments_analytics_payload(db: Session) -> dict[str, Any]:
+    day = utcnow() - timedelta(days=1)
+    week = utcnow() - timedelta(days=7)
+    paid = PurchaseStatus.PAID.value
+    total_stars = int(db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == paid)) or 0)
+    stars_day = int(db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == paid, Purchase.created_at >= day)) or 0)
+    stars_week = int(db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == paid, Purchase.created_at >= week)) or 0)
+    count_total = int(db.scalar(select(func.count(Purchase.id)).where(Purchase.status == paid)) or 0)
+    by_product_rows = db.execute(
+        select(Purchase.product_key, func.count(Purchase.id), func.coalesce(func.sum(Purchase.stars_amount), 0))
+        .where(Purchase.status == paid)
+        .group_by(Purchase.product_key)
+        .order_by(desc(func.coalesce(func.sum(Purchase.stars_amount), 0)))
+        .limit(8)
+    ).all()
+    return {
+        "purchases_total": count_total,
+        "stars_total": total_stars,
+        "stars_day": stars_day,
+        "stars_week": stars_week,
+        "by_product": [{"key": key, "count": int(count), "stars": int(stars or 0)} for key, count, stars in by_product_rows],
+    }
+
+
+def dead_chats_payload(db: Session, days: int = 7, limit: int = 15) -> list[dict[str, Any]]:
+    since = utcnow() - timedelta(days=max(1, int(days or 7)))
+    last_subq = (
+        select(ActionLog.city_id, func.max(ActionLog.created_at).label("last_at"), func.count(ActionLog.id).label("actions"))
+        .where(ActionLog.city_id.is_not(None))
+        .group_by(ActionLog.city_id)
+        .subquery()
+    )
+    rows = db.execute(
+        select(City, last_subq.c.last_at, func.coalesce(last_subq.c.actions, 0))
+        .outerjoin(last_subq, last_subq.c.city_id == City.id)
+        .where((last_subq.c.last_at.is_(None)) | (last_subq.c.last_at < since))
+        .order_by(City.created_at)
+        .limit(limit)
+    ).all()
+    result = []
+    now = utcnow()
+    for city, last_at, actions in rows:
+        aware_last = _aware(last_at) if last_at else None
+        silent_days = int((now - aware_last).days) if aware_last else None
+        result.append({
+            "id": city.id,
+            "name": city.name,
+            "title": city.title,
+            "invite_code": city.invite_code,
+            "last_at": aware_last.isoformat() if aware_last else None,
+            "silent_days": silent_days,
+            "actions_total": int(actions or 0),
+            "population": city_population(db, city.id),
+        })
+    return result
+
+
+def city_store_payload(db: Session, city: City) -> dict[str, Any]:
+    premium = city_premium_payload(city)
+    purchases = db.scalars(
+        select(Purchase)
+        .where(Purchase.city_id == city.id, Purchase.status == PurchaseStatus.PAID.value)
+        .order_by(desc(Purchase.created_at))
+        .limit(8)
+    ).all()
+    return {
+        "premium": premium,
+        "items": stars_products_payload()["items"],
+        "purchases": [
+            {
+                "product_key": p.product_key,
+                "stars": p.stars_amount,
+                "text": p.applied_text or p.product_key,
+                "created_at": p.created_at.isoformat(),
+            }
+            for p in purchases
+        ],
+    }
+
+
+def use_city_store_item(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any], CityEvent | None]:
+    premium = get_city_premium(city)
+    event: CityEvent | None = None
+    key = (key or "").strip().lower()
+    if key == "ai_newspaper":
+        tokens = int(premium.get("ai_newspaper_tokens", 0) or 0)
+        if tokens <= 0:
+            return False, "AI-газет нет в запасе.", city_store_payload(db, city), None
+        premium["ai_newspaper_tokens"] = tokens - 1
+        city.xp += 12
+        text = f"🗞 {display_player(player)} выпустил премиум-газету района."
+    elif key == "premium_event":
+        count = int(premium.get("premium_events", 0) or 0)
+        if count <= 0:
+            return False, "Больших событий нет в запасе.", city_store_payload(db, city), None
+        premium["premium_events"] = count - 1
+        event = create_drama_event(db, city, force=True)
+        city.xp += 20
+        city.treasury += 8
+        text = f"🎭 {display_player(player)} запустил большое событие района."
+    elif key == "season_bundle":
+        if not premium.get("season_badge"):
+            return False, "Сезонный набор не найден.", city_store_payload(db, city), None
+        trophy = award_trophy(city, f"🏆 Активирован {premium.get('season_badge')}")
+        premium["season_badge"] = ""
+        text = f"🏆 {display_player(player)} активировал сезонный набор. Трофей: {trophy}."
+    else:
+        return False, "Этот предмет применяется автоматически.", city_store_payload(db, city), None
+    set_city_premium(city, premium)
+    log(db, city.id, player.id, "store_use", text)
+    add_city_history(city, text, "⭐")
+    maybe_level_up(city)
+    db.flush()
+    return True, text, city_store_payload(db, city), event
+
+
+def promo_pack_payload(db: Session, city: City) -> dict[str, Any]:
+    payload = city_payload(db, city)
+    return {
+        "city": payload,
+        "text": (
+            f"🏙 Наш чат стал городом в Чатограде.\n\n"
+            f"Город: {city.name}\n"
+            f"Лига: {payload.get('league', '🥉 Дворовая лига')}\n"
+            f"Казна: {city.treasury} · жители: {payload.get('population', 0)} · трофеи: {len(get_city_trophies(city))}\n\n"
+            f"Добавь Чатоград в свой чат и построй свой район."
+        ),
+        "code": city.invite_code,
+    }
+
+
+def owner_center_payload(db: Session, city: City) -> dict[str, Any]:
+    base = owner_stats_payload(db, city)
+    base["settings"] = city_settings_payload(city)
+    base["referral"] = referral_progress_payload(db, city)
+    base["store"] = city_store_payload(db, city)
+    base["promo"] = promo_pack_payload(db, city)
+    base["league"] = city_league(db, city)
+    return base
+
+
+def weekly_digest_payload(db: Session, city: City) -> dict[str, Any]:
+    since = utcnow() - timedelta(days=7)
+    actions = int(db.scalar(select(func.count(ActionLog.id)).where(ActionLog.city_id == city.id, ActionLog.created_at >= since)) or 0)
+    active_players = int(db.scalar(select(func.count(func.distinct(ActionLog.player_id))).where(ActionLog.city_id == city.id, ActionLog.player_id.is_not(None), ActionLog.created_at >= since)) or 0)
+    raids = int(db.scalar(select(func.count(War.id)).where(((War.attacker_city_id == city.id) | (War.defender_city_id == city.id)), War.finished_at >= since)) or 0)
+    top = top_players(db, city, limit=3)
+    return {
+        "city": city_payload(db, city),
+        "actions": actions,
+        "active_players": active_players,
+        "raids": raids,
+        "top": top,
+        "referrals": city_referral_count(db, city.id),
+        "trophies": get_city_trophies(city),
+    }
 
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:

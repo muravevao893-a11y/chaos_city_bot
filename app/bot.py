@@ -107,6 +107,15 @@ from app.game import (
     register_ai_usage,
     secret_role_payload,
     mission_payload,
+    growth_analytics_payload,
+    retention_payload,
+    payments_analytics_payload,
+    dead_chats_payload,
+    city_store_payload,
+    use_city_store_item,
+    promo_pack_payload,
+    owner_center_payload,
+    weekly_digest_payload,
     owner_stats_payload,
     stars_products_payload,
     MECHANIC_TOGGLES,
@@ -231,6 +240,8 @@ def back_keyboard() -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="cc:admin_stats")],
+        [InlineKeyboardButton(text="📈 Рост", callback_data="cc:admin_growth"), InlineKeyboardButton(text="🧲 Удержание", callback_data="cc:admin_retention")],
+        [InlineKeyboardButton(text="⭐ Платежи", callback_data="cc:admin_payments"), InlineKeyboardButton(text="💤 Тихие", callback_data="cc:admin_dead_chats")],
         [InlineKeyboardButton(text="🏙 Чаты", callback_data="cc:admin_chats"), InlineKeyboardButton(text="📝 Отзывы", callback_data="cc:admin_feedback")],
     ])
 
@@ -935,9 +946,16 @@ def founder_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary"),
-            InlineKeyboardButton(text="📈 Статистика", callback_data="cc:owner_stats"),
+            InlineKeyboardButton(text="👑 Owner", callback_data="cc:owner_center"),
         ],
-        [InlineKeyboardButton(text="🤖 AI-статус", callback_data="cc:ai_status")],
+        [
+            InlineKeyboardButton(text="⭐ Магазин", callback_data="cc:city_store"),
+            InlineKeyboardButton(text="📣 Promo-pack", callback_data="cc:promo_pack"),
+        ],
+        [
+            InlineKeyboardButton(text="📈 Статистика", callback_data="cc:owner_stats"),
+            InlineKeyboardButton(text="🤖 AI-статус", callback_data="cc:ai_status"),
+        ],
         [
             InlineKeyboardButton(text="🔕 Тихо", callback_data="cc:mode:quiet"),
             InlineKeyboardButton(text="⚖️ Норм", callback_data="cc:mode:normal"),
@@ -1058,6 +1076,137 @@ def render_owner_stats(payload: dict[str, Any]) -> str:
         lines.append(f"Главный активист: <b>{h(p['name'])}</b> · влияние {p['influence']} · репа {p['rep']}")
     return "\n".join(lines)
 
+
+
+
+def render_owner_center(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    store = payload.get("store", {}).get("premium", {})
+    referral = payload.get("referral", {})
+    lines = [
+        "👑 <b>Owner-центр</b>",
+        "",
+        f"Город: <b>{h(city['name'])}</b>",
+        f"Лига: <b>{h(payload.get('league', city.get('league', '🥉 Дворовая лига')))}</b>",
+        f"Жители: <b>{payload['population']}</b> · активных 24ч: <b>{payload['active_24h']}</b>",
+        f"Действий за 24ч: <b>{payload['actions_24h']}</b>",
+        f"Режим: <b>{h(payload['mode']['name'])}</b>",
+        f"Сарафанка: <b>{referral.get('total', 0)}</b> чатов",
+        f"AI-газеты: <b>{store.get('ai_newspaper_tokens', 0)}</b> · события: <b>{store.get('premium_events', 0)}</b>",
+    ]
+    if payload.get("top_player"):
+        p = payload["top_player"]
+        lines.append(f"Активист: <b>{h(p['name'])}</b> · влияние {p['influence']}")
+    if payload.get("top_action"):
+        a = payload["top_action"]
+        lines.append(f"Популярное: <b>{h(a['action'])}</b> × {a['count']}")
+    return "\n".join(lines)
+
+
+def render_city_store(payload: dict[str, Any]) -> str:
+    premium = payload.get("premium", {})
+    lines = [
+        "⭐ <b>Магазин города</b>",
+        "",
+        f"AI-газеты: <b>{premium.get('ai_newspaper_tokens', 0)}</b>",
+        f"Премиум-события: <b>{premium.get('premium_events', 0)}</b>",
+        f"Переименования: <b>{premium.get('rename_tokens', 0)}</b>",
+        f"Стиль: <b>{h(premium.get('style', 'обычный'))}</b>",
+    ]
+    purchases = payload.get("purchases") or []
+    if purchases:
+        lines.append("\nПоследние покупки:")
+        for item in purchases[:5]:
+            lines.append(f"• {h(item.get('text', item.get('product_key', 'покупка')))} · {item.get('stars', 0)} ⭐")
+    return "\n".join(lines)
+
+
+def city_store_keyboard(payload: dict[str, Any]) -> InlineKeyboardMarkup:
+    premium = payload.get("premium", {})
+    rows: list[list[InlineKeyboardButton]] = []
+    if int(premium.get("ai_newspaper_tokens", 0) or 0) > 0:
+        rows.append([InlineKeyboardButton(text="🗞 Выпустить AI-газету", callback_data="cc:store_use:ai_newspaper")])
+    if int(premium.get("premium_events", 0) or 0) > 0:
+        rows.append([InlineKeyboardButton(text="🎭 Запустить большое событие", callback_data="cc:store_use:premium_event")])
+    if premium.get("season_badge"):
+        rows.append([InlineKeyboardButton(text="🏆 Активировать сезонный набор", callback_data="cc:store_use:season_bundle")])
+    rows.append([InlineKeyboardButton(text="⭐ Лавка Stars", callback_data="cc:stars")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_promo_pack(payload: dict[str, Any]) -> str:
+    return "📣 <b>Promo-pack</b>\n\n" + h(payload.get("text", "")) + f"\n\nКод города: <code>{h(payload.get('code', ''))}</code>"
+
+
+def render_weekly_digest(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    lines = [
+        f"🏆 <b>Итоги недели: {h(city['name'])}</b>",
+        "",
+        f"Лига: <b>{h(city.get('league', '🥉 Дворовая лига'))}</b>",
+        f"Действий: <b>{payload['actions']}</b> · активных жителей: <b>{payload['active_players']}</b>",
+        f"Рейдов: <b>{payload['raids']}</b> · сарафанка: <b>{payload['referrals']}</b>",
+        f"Казна: <b>{city['treasury']}</b> · трофеи: <b>{len(payload.get('trophies') or [])}</b>",
+    ]
+    if payload.get("top"):
+        lines.append("\nЛучшие жители:")
+        for item in payload["top"][:3]:
+            lines.append(f"• <b>{h(item['name'])}</b> — {h(item['title'])}")
+    return "\n".join(lines)
+
+
+def render_admin_growth(payload: dict[str, Any]) -> str:
+    lines = [
+        "📈 <b>Рост</b>",
+        "",
+        f"Городов всего: <b>{payload['cities_total']}</b>",
+        f"Новых за 24ч: <b>{payload['new_cities_day']}</b> · за 7д: <b>{payload['new_cities_week']}</b>",
+        f"Активных за 24ч: <b>{payload['active_cities_day']}</b> · за 7д: <b>{payload['active_cities_week']}</b>",
+        f"Действий за 24ч: <b>{payload['actions_day']}</b> · за 7д: <b>{payload['actions_week']}</b>",
+    ]
+    if payload.get("top_week"):
+        lines.append("\nТоп недели:")
+        for item in payload["top_week"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> · {item['actions']} действий")
+    return "\n".join(lines)
+
+
+def render_admin_retention(payload: dict[str, Any]) -> str:
+    return (
+        "🧲 <b>Удержание</b>\n\n"
+        f"Городов: <b>{payload['cities_total']}</b>\n"
+        f"Активны 24ч: <b>{payload['active_day']}</b>\n"
+        f"Активны 7д: <b>{payload['active_week']}</b>\n"
+        f"Активны 30д: <b>{payload['active_month']}</b>\n"
+        f"Тихих за неделю: <b>{payload['quiet_week']}</b>"
+    )
+
+
+def render_admin_payments(payload: dict[str, Any]) -> str:
+    lines = [
+        "⭐ <b>Платежи</b>",
+        "",
+        f"Покупок всего: <b>{payload['purchases_total']}</b>",
+        f"Stars всего: <b>{payload['stars_total']}</b>",
+        f"Stars 24ч: <b>{payload['stars_day']}</b> · 7д: <b>{payload['stars_week']}</b>",
+    ]
+    if payload.get("by_product"):
+        lines.append("\nПо товарам:")
+        for item in payload["by_product"]:
+            lines.append(f"• <b>{h(item['key'])}</b> · {item['count']} шт · {item['stars']} ⭐")
+    return "\n".join(lines)
+
+
+def render_dead_chats(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "💤 <b>Тихие чаты</b>\n\nПока пусто."
+    lines = ["💤 <b>Тихие чаты</b>", ""]
+    for item in items:
+        silence = item.get("silent_days")
+        silence_text = f"{silence}д" if silence is not None else "нет действий"
+        lines.append(f"• <b>{h(item['name'])}</b> · id {item['id']} · тишина {silence_text} · жители {item['population']}")
+    return "\n".join(lines)
 
 def render_stars(payload: dict[str, Any]) -> str:
     status = "включены" if payload.get("enabled") else "выключены"
@@ -1725,6 +1874,38 @@ async def cmd_owner_stats(message: Message) -> None:
     await perform_owner_stats(message, message.from_user)
 
 
+@router.message(Command("owner"))
+async def cmd_owner_center(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Owner-центр доступен в группе.")
+        return
+    await perform_owner_center(message, message.from_user)
+
+
+@router.message(Command("store"))
+async def cmd_city_store(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Магазин доступен в группе.")
+        return
+    await perform_city_store(message, message.from_user)
+
+
+@router.message(Command("promo_pack"))
+async def cmd_promo_pack(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Promo-pack доступен в группе.")
+        return
+    await perform_promo_pack(message)
+
+
+@router.message(Command("weekdigest"))
+async def cmd_weekdigest(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Итоги доступны в группе.")
+        return
+    await perform_weekly_digest(message)
+
+
 @router.message(Command("share"))
 async def cmd_share(message: Message, bot: Bot) -> None:
     await perform_promo(message, bot)
@@ -1789,6 +1970,55 @@ async def perform_owner_stats(message: Message, user: Any | None) -> None:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         payload = owner_stats_payload(db, city)
     await send_game_message(message, render_owner_stats(payload), reply_markup=founder_keyboard())
+
+
+async def perform_owner_center(message: Message, user: Any | None) -> None:
+    if not user or not await is_user_chat_owner(message.bot, message.chat.id, user.id):
+        await send_game_message(message, "👑 Owner-центр доступен владельцу чата.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = owner_center_payload(db, city)
+    await send_game_message(message, render_owner_center(payload), reply_markup=founder_keyboard())
+
+
+async def perform_city_store(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = city_store_payload(db, city)
+    await send_game_message(message, render_city_store(payload), reply_markup=city_store_keyboard(payload))
+
+
+async def perform_city_store_use(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload, event = use_city_store_item(db, city, player, key)
+        event_view = event_payload(event) if event else None
+    body = h(text)
+    if event_view:
+        body += "\n\n" + render_event(event_view)
+    await send_game_message(message, body, reply_markup=city_store_keyboard(payload) if not event_view else event_keyboard())
+
+
+async def perform_promo_pack(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = promo_pack_payload(db, city)
+    await send_game_message(message, render_promo_pack(payload), reply_markup=back_keyboard())
+
+
+async def perform_weekly_digest(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = weekly_digest_payload(db, city)
+    await send_game_message(message, render_weekly_digest(payload), reply_markup=back_keyboard())
 
 
 async def perform_stars(message: Message) -> None:
@@ -2614,6 +2844,42 @@ async def perform_admin_set_chat_status(message: Message, code_or_id: str, statu
     with session_scope() as db:
         ok, text = admin_set_city_status(db, code_or_id, status)
     await send_game_message(message, h(text), reply_markup=admin_keyboard())
+
+
+async def perform_admin_growth(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        payload = growth_analytics_payload(db)
+    await send_game_message(message, render_admin_growth(payload), reply_markup=admin_keyboard())
+
+
+async def perform_admin_retention(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        payload = retention_payload(db)
+    await send_game_message(message, render_admin_retention(payload), reply_markup=admin_keyboard())
+
+
+async def perform_admin_payments(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        payload = payments_analytics_payload(db)
+    await send_game_message(message, render_admin_payments(payload), reply_markup=admin_keyboard())
+
+
+async def perform_admin_dead_chats(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        items = dead_chats_payload(db, days=7, limit=15)
+    await send_game_message(message, render_dead_chats(items), reply_markup=admin_keyboard())
 
 
 
@@ -3574,6 +3840,79 @@ async def cb_day_card(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await perform_day_card(callback.message)
+
+
+@router.callback_query(F.data == "cc:owner_center")
+async def cb_owner_center(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_owner_center(callback.message, callback.from_user)
+
+
+@router.callback_query(F.data == "cc:city_store")
+async def cb_city_store(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_city_store(callback.message, callback.from_user)
+
+
+@router.callback_query(F.data.startswith("cc:store_use:"))
+async def cb_store_use(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    key = callback.data.split(":", 2)[2]
+    await callback.answer()
+    await perform_city_store_use(callback.message, callback.from_user, key)
+
+
+@router.callback_query(F.data == "cc:promo_pack")
+async def cb_promo_pack(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_promo_pack(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_growth")
+async def cb_admin_growth(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_growth(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_retention")
+async def cb_admin_retention(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_retention(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_payments")
+async def cb_admin_payments(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_payments(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_dead_chats")
+async def cb_admin_dead_chats(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_dead_chats(callback.message)
 
 
 @router.callback_query(F.data == "cc:global_top")
