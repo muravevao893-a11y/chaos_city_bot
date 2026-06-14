@@ -1,33 +1,27 @@
-# Чатоград Bot v0.7
+# Чатоград Bot v0.7.2 Railway
 
 **Чатоград** — Telegram-бот для групп, где обычный чат становится городом: жители, казна, работа, события, суды, подвал, постройки, магазин, ежедневные награды, сезоны, газета, драмы, выборы, квесты, рейды, трофеи и должности.
 
-Версия **без Mini App**. Всё работает прямо в Telegram-группе через кнопки.
+Версия **без Mini App**. Всё работает прямо в Telegram-группе через кнопки. Этот архив подготовлен под деплой на **Railway + PostgreSQL**.
 
-## Что нового в v0.7
+## Что нового в v0.7.2 Railway
 
-- Добавлены **сезоны** на 14 дней.
-- Добавлена кнопка **🎁 Награда** и команда `/daily`.
-- Добавлены **серии ежедневных наград**.
-- Добавлен **уровень игрока** в профиле.
-- Добавлен **магазин города**: праздник, защита, агитбригада, рейдовые барабаны, памятник.
-- Добавлены команды `/shop` и `/season`.
-- Основная панель стала компактнее: часть действий переехала в **⚙️ Ещё**.
-- В обычных ответах больше не прилетает огромная простыня inline-кнопок.
-- Добавлено управляемое сообщение города: бот старается удалять старое игровое сообщение и отправлять новое.
-- Командные сообщения пользователя тоже пытаются удаляться, если у бота есть права.
-- Автособытия тоже используют управляемое сообщение, чтобы не плодить кнопочные простыни.
-- Оптимизирован глобальный топ городов: убран N+1 подсчёт жителей.
-- Добавлены индексы для рейдов, логов, участников и ежедневных наград.
-- Для SQLite включены `WAL`, `foreign_keys`, `busy_timeout`, `synchronous=NORMAL`.
-- Лёгкие миграции дополняют старые локальные базы новыми колонками.
+- Проект подготовлен под Railway-деплой.
+- Обновлён `railway.json`: запуск через `python -m app.main`, healthcheck `/api/health`, таймаут healthcheck 300 секунд.
+- Dockerfile теперь использует тот же запуск, что и локальная версия.
+- Добавлен `RAILWAY_DEPLOY.md` с пошаговым деплоем.
+- Добавлен `.env.railway.example` с Railway-переменными.
+- Добавлены `.dockerignore` и `.gitignore`, чтобы `.env`, базы и мусор не улетали в Docker/GitHub.
+- Добавлен endpoint `/api/ready` для проверки подключения к базе.
+- PostgreSQL остаётся основным рекомендуемым режимом для живого бота.
+- `DATABASE_URL=postgres://...` и `DATABASE_URL=postgresql://...` автоматически переводятся в `postgresql+psycopg://...`.
 
 ## Что уже есть
 
 - Telegram-бот на `aiogram 3`.
-- База через `SQLAlchemy`.
-- SQLite по умолчанию.
-- PostgreSQL через `DATABASE_URL`.
+- База через `SQLAlchemy 2`.
+- PostgreSQL через `psycopg v3`.
+- SQLite fallback для временного локального запуска.
 - Игровой город для каждого группового чата.
 - Компактная кнопочная панель действий.
 - Автоматическое добавление людей в жители города, кроме ботов.
@@ -53,6 +47,198 @@
 - Логи города.
 - Реферальная ссылка в личке.
 - Docker/Railway-ready файлы.
+
+
+## Быстрый деплой на Railway
+
+Подробная инструкция лежит в [`RAILWAY_DEPLOY.md`](RAILWAY_DEPLOY.md).
+
+Минимальный порядок:
+
+1. Залей проект на GitHub.
+2. В Railway создай проект из GitHub-репозитория.
+3. Добавь PostgreSQL service.
+4. В сервисе бота добавь переменные:
+
+```env
+BOT_TOKEN=твой_токен_от_BotFather
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+RUN_BOT_POLLING=true
+ENABLE_AUTO_EVENTS=true
+AUTO_EVENT_INTERVAL_MINUTES=30
+AUTO_EVENT_MIN_POPULATION=1
+ADMIN_IDS=
+APP_SECRET=длинный_секрет_32_символа_или_больше
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_POOL_RECYCLE_SECONDS=1800
+```
+
+`PORT` руками не указывай. Railway сам его выдаёт, приложение само читает.
+
+После деплоя проверь:
+
+```text
+/api/health
+/api/ready
+```
+
+Важно: держи **1 реплику** бота и не запускай локальную копию одновременно с Railway, иначе Telegram polling начнёт конфликтовать.
+
+## Быстрый запуск локально с PostgreSQL
+
+Нужен установленный Docker Desktop.
+
+```bash
+cd chaos_city_bot
+```
+
+Запусти PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Создай виртуальное окружение:
+
+```bash
+python -m venv .venv
+```
+
+Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+Linux/macOS:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+В `.env` вставь токен от BotFather:
+
+```env
+BOT_TOKEN=твой_токен_бота
+DATABASE_URL=postgresql+psycopg://chatograd:chatograd_password@localhost:5432/chatograd
+RUN_BOT_POLLING=true
+ENABLE_AUTO_EVENTS=true
+PORT=8080
+ADMIN_IDS=
+```
+
+Запусти бота:
+
+```bash
+python -m app.main
+```
+
+Проверка health:
+
+```text
+http://localhost:8080/api/health
+```
+
+Если порт 8080 занят, поменяй в `.env`:
+
+```env
+PORT=8081
+```
+
+## Если PostgreSQL не запускается
+
+Проверить контейнеры:
+
+```bash
+docker ps
+```
+
+Посмотреть логи PostgreSQL:
+
+```bash
+docker compose logs postgres
+```
+
+Перезапустить PostgreSQL:
+
+```bash
+docker compose restart postgres
+```
+
+Полностью удалить локальную PostgreSQL-базу и создать заново:
+
+```bash
+docker compose down -v
+docker compose up -d postgres
+```
+
+Осторожно: `down -v` удалит локальные данные PostgreSQL.
+
+## Быстрый запуск на SQLite, если PostgreSQL пока не нужен
+
+В `.env` можно временно поставить:
+
+```env
+DATABASE_URL=sqlite:///./chatograd.db
+```
+
+Но для реального бота лучше PostgreSQL. SQLite норм для теста, но не для живого проекта с группами и автособытиями.
+
+## Railway / Render / Neon PostgreSQL URL
+
+Можно вставлять URL от хостинга почти как есть:
+
+```env
+DATABASE_URL=postgres://user:password@host:5432/dbname
+```
+
+или:
+
+```env
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+Приложение само переведёт это в формат `postgresql+psycopg://...`.
+
+Переменные окружения для Railway:
+
+```env
+BOT_TOKEN=твой_токен
+DATABASE_URL=postgres://...
+RUN_BOT_POLLING=true
+ENABLE_AUTO_EVENTS=true
+PORT=8080
+ADMIN_IDS=
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=10
+DB_POOL_RECYCLE_SECONDS=1800
+```
+
+Railway-запуск уже прописан в `railway.json`:
+
+```json
+"startCommand": "python -m app.main"
+```
+
+`Procfile` оставлен как fallback:
+
+```text
+web: python -m app.main
+```
+
+## Проверка в Telegram
+
+1. Напиши боту `/start` в личке.
+2. Добавь его в группу.
+3. В группе напиши `/start`.
+4. Владелец группы нажимает **👑 Основатель** в меню **⚙️ Ещё** или пишет `/founder`.
+5. Дальше игра идёт кнопками.
+6. Рейды: в одном чате скопируй код города, в другом напиши `/raid CODE`, затем во втором городе открой `/raids` и прими вызов.
 
 ## Команды в группе
 
@@ -120,67 +306,6 @@ help - помощь
 /help        - короткая панель
 ```
 
-## Как запускать локально
-
-```bash
-cd chaos_city_bot
-python -m venv .venv
-```
-
-Windows PowerShell:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-copy .env.example .env
-```
-
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-В `.env` вставь токен от BotFather:
-
-```env
-BOT_TOKEN=твой_токен_бота
-DATABASE_URL=sqlite:///./chatograd.db
-RUN_BOT_POLLING=true
-ENABLE_AUTO_EVENTS=true
-PORT=8080
-ADMIN_IDS=
-```
-
-Запуск:
-
-```bash
-python -m app.main
-```
-
-Проверка health:
-
-```text
-http://localhost:8080/api/health
-```
-
-Если порт 8080 занят, поменяй в `.env`:
-
-```env
-PORT=8081
-```
-
-## Проверка в Telegram
-
-1. Напиши боту `/start` в личке.
-2. Добавь его в группу.
-3. В группе напиши `/start`.
-4. Владелец группы нажимает **👑 Основатель** в меню **⚙️ Ещё** или пишет `/founder`.
-5. Дальше игра идёт кнопками.
-6. Рейды: в одном чате скопируй код города, в другом напиши `/raid CODE`, затем во втором городе открой `/raids` и прими вызов.
-
 ## Важно про удаление старых сообщений
 
 Бот старается держать одно актуальное игровое сообщение в группе:
@@ -213,23 +338,4 @@ PORT=8081
 ```bash
 python -m compileall app tests
 python -m unittest discover -s tests -v
-```
-
-## Railway
-
-Переменные окружения:
-
-```env
-BOT_TOKEN=твой_токен
-DATABASE_URL=postgresql+psycopg://...
-RUN_BOT_POLLING=true
-ENABLE_AUTO_EVENTS=true
-PORT=8080
-ADMIN_IDS=
-```
-
-Команда запуска уже в `Procfile`:
-
-```text
-web: python -m app.main
 ```

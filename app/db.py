@@ -3,7 +3,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import create_engine, inspect, text, event
+from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -13,17 +14,30 @@ class Base(DeclarativeBase):
     pass
 
 
-def _engine_kwargs(database_url: str) -> dict:
-    if database_url.startswith("sqlite"):
-        return {"connect_args": {"check_same_thread": False}, "pool_pre_ping": True}
-    return {"pool_pre_ping": True, "pool_size": 5, "max_overflow": 10}
-
-
 settings = get_settings()
-engine = create_engine(settings.database_url, future=True, **_engine_kwargs(settings.database_url))
 
 
-if settings.database_url.startswith("sqlite"):
+def _engine_kwargs() -> dict:
+    if settings.is_sqlite:
+        return {
+            "connect_args": {"check_same_thread": False},
+            "pool_pre_ping": True,
+        }
+    if settings.is_postgres:
+        return {
+            "pool_pre_ping": True,
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_recycle": settings.db_pool_recycle_seconds,
+            "connect_args": {"connect_timeout": 10},
+        }
+    return {"pool_pre_ping": True}
+
+
+engine = create_engine(settings.database_url, future=True, **_engine_kwargs())
+
+
+if settings.is_sqlite:
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection, _connection_record):
         cursor = dbapi_connection.cursor()
@@ -37,11 +51,22 @@ if settings.database_url.startswith("sqlite"):
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
 
-def _add_column_if_missing(table_name: str, column_name: str, ddl: str) -> None:
-    """Tiny safe migration helper for early MVP installs.
+def _quote_ident(name: str) -> str:
+    # All project table/column names are controlled constants. Keep quoting simple
+    # and safe for PostgreSQL reserved words / mixed hosting configs.
+    return '"' + name.replace('"', '""') + '"'
 
-    The project intentionally avoids Alembic for now, but existing local SQLite/Postgres
-    databases still need small additive schema updates when v0.4 adds fields.
+
+def _timestamp_ddl(nullable: bool = True) -> str:
+    base = "TIMESTAMP WITH TIME ZONE" if settings.is_postgres else "TIMESTAMP"
+    return base if nullable else f"{base} NOT NULL"
+
+
+def _add_column_if_missing(table_name: str, column_name: str, ddl: str) -> None:
+    """Small additive migration helper for MVP installs.
+
+    This is intentionally tiny: enough for current early versions without forcing
+    Alembic onto the project yet. It works with both SQLite and PostgreSQL.
     """
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
@@ -51,7 +76,7 @@ def _add_column_if_missing(table_name: str, column_name: str, ddl: str) -> None:
     if column_name in columns:
         return
     with engine.begin() as conn:
-        conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+        conn.execute(text(f"ALTER TABLE {_quote_ident(table_name)} ADD COLUMN {ddl}"))
 
 
 def _create_index_if_missing(index_name: str, ddl: str) -> None:
@@ -71,25 +96,37 @@ def _run_light_migrations() -> None:
     _add_column_if_missing("cities", "trophies_json", "trophies_json TEXT NOT NULL DEFAULT '[]'")
     _add_column_if_missing("cities", "shop_json", "shop_json TEXT NOT NULL DEFAULT '{}'")
     _add_column_if_missing("cities", "season_number", "season_number INTEGER NOT NULL DEFAULT 1")
-    _add_column_if_missing("cities", "season_started_at", "season_started_at TIMESTAMP")
+    _add_column_if_missing("cities", "season_started_at", f"season_started_at {_timestamp_ddl()}")
     _add_column_if_missing("cities", "last_bot_message_id", "last_bot_message_id BIGINT")
-    _add_column_if_missing("players", "last_daily_at", "last_daily_at TIMESTAMP")
+    _add_column_if_missing("players", "last_daily_at", f"last_daily_at {_timestamp_ddl()}")
     _add_column_if_missing("players", "daily_streak", "daily_streak INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("memberships", "special_title", "special_title VARCHAR(64)")
     _add_column_if_missing("memberships", "civic_title", "civic_title VARCHAR(64)")
-    _add_column_if_missing("memberships", "jailed_until", "jailed_until TIMESTAMP")
+    _add_column_if_missing("memberships", "jailed_until", f"jailed_until {_timestamp_ddl()}")
     _add_column_if_missing("memberships", "convictions", "convictions INTEGER NOT NULL DEFAULT 0")
     _create_index_if_missing("ix_wars_defender_status_created", "CREATE INDEX ix_wars_defender_status_created ON wars (defender_city_id, status, created_at)")
     _create_index_if_missing("ix_wars_attacker_defender_status", "CREATE INDEX ix_wars_attacker_defender_status ON wars (attacker_city_id, defender_city_id, status)")
     _create_index_if_missing("ix_players_daily", "CREATE INDEX ix_players_daily ON players (last_daily_at)")
+    _create_index_if_missing("ix_cities_owner", "CREATE INDEX ix_cities_owner ON cities (owner_telegram_user_id)")
+    _create_index_if_missing("ix_players_telegram", "CREATE INDEX ix_players_telegram ON players (telegram_user_id)")
 
 
 def init_db() -> None:
     # Import models before create_all so SQLAlchemy sees all tables.
     import app.models  # noqa: F401
 
-    Base.metadata.create_all(bind=engine)
-    _run_light_migrations()
+    try:
+        Base.metadata.create_all(bind=engine)
+        _run_light_migrations()
+    except OperationalError as exc:
+        db_hint = (
+            "\n\nНе удалось подключиться к базе данных.\n"
+            "Проверь DATABASE_URL в .env. Для локального PostgreSQL можно запустить:\n"
+            "  docker compose up -d postgres\n"
+            "и использовать:\n"
+            "  DATABASE_URL=postgresql+psycopg://chatograd:chatograd_password@localhost:5432/chatograd\n"
+        )
+        raise RuntimeError(db_hint) from exc
 
 
 @contextmanager

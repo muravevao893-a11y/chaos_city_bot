@@ -32,6 +32,7 @@ _bot_task: asyncio.Task | None = None
 async def lifespan(app: FastAPI):
     global _bot_task
     settings = get_settings()
+    logger.info("Starting Chatograd service: host=%s port=%s polling=%s auto_events=%s", settings.host, settings.port, settings.run_bot_polling, settings.enable_auto_events)
     init_db()
     logger.info("Database initialized")
 
@@ -55,7 +56,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Chatograd Bot",
         description="Telegram-only group city game: buttons, quests, newspaper, elections, drama, voting, economy and raids.",
-        version="0.6.1",
+        version="0.7.2-railway",
         lifespan=lifespan,
     )
     app.add_middleware(
