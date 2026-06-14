@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery, User
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -22,6 +22,8 @@ from app.game import (
     APPOINTABLE_TITLES,
     FACTIONS,
     ITEMS,
+    TITLE_MARKET,
+    STARS_PRODUCTS,
     active_incoming_raids,
     ACTIVITY_MODES,
     achievement_payload,
@@ -29,6 +31,7 @@ from app.game import (
     admin_stats,
     appoint_city_official,
     buy_shop_item,
+    buy_title,
     buy_black_market_item,
     black_market_payload,
     attempt_escape,
@@ -98,8 +101,13 @@ from app.game import (
     mission_payload,
     owner_stats_payload,
     stars_products_payload,
+    title_market_payload,
+    apply_stars_purchase,
+    get_stars_product,
+    make_stars_payload,
+    parse_stars_payload,
 )
-from app.models import City
+from app.models import City, Player
 
 logger = logging.getLogger(__name__)
 router = Router(name="chatograd-router")
@@ -292,8 +300,12 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape"),
         ],
         [
+            InlineKeyboardButton(text="🏷 Титулы", callback_data="cc:title_market"),
             InlineKeyboardButton(text="⭐ Stars", callback_data="cc:stars"),
+        ],
+        [
             InlineKeyboardButton(text="📣 Поделиться", callback_data="cc:share"),
+            InlineKeyboardButton(text="🎁 Донат", callback_data="cc:donate"),
         ],
         [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
@@ -607,6 +619,7 @@ def render_admin_stats(payload: dict[str, Any]) -> str:
         f"Рейдов: активных <b>{payload['raids_active']}</b> · завершённых <b>{payload['raids_finished']}</b>",
         f"Дуэлей: активных <b>{payload.get('duels_active', 0)}</b> · завершённых <b>{payload.get('duels_finished', 0)}</b>",
         f"Покупок на чёрном рынке за 24ч: <b>{payload.get('black_market_actions', 0)}</b>",
+        f"Stars-покупок за 24ч: <b>{payload.get('stars_purchases_day', 0)}</b> · <b>{payload.get('stars_total_day', 0)}</b> ⭐",
     ]
     if top_action:
         lines.append(f"Самое частое действие за 24ч: <b>{h(top_action.get('action'))}</b> · {top_action.get('count')}")
@@ -632,6 +645,30 @@ def render_shop(payload: dict[str, Any], city_treasury: int) -> str:
     for item in payload["items"]:
         lines.append(f"{h(item['name'])} · куплено <b>{item['count']}</b> · цена <b>{item['cost']}</b>")
     return "\n".join(lines)
+
+
+
+def render_title_market(payload: dict[str, Any]) -> str:
+    lines = [
+        "🏷 <b>Рынок титулов</b>",
+        "",
+        f"Твой титул: <b>{h(payload.get('current_title', 'без титула'))}</b>",
+        f"Монеты: <b>{payload.get('coins', 0)}</b>",
+        "",
+        "Купи титул и ходи по району с важным видом.",
+        "",
+    ]
+    for item in payload.get("items", []):
+        lines.append(f"• <b>{h(item['name'])}</b> — {item['cost']} монет")
+    return "\n".join(lines)
+
+
+def title_market_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, spec in TITLE_MARKET.items():
+        rows.append([InlineKeyboardButton(text=f"{spec['name']} · {spec['cost']}", callback_data=f"cc:title_buy:{key}")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def shop_keyboard() -> InlineKeyboardMarkup:
@@ -767,7 +804,7 @@ def render_founder_panel(payload: dict[str, Any]) -> str:
         f"Режим: <b>{h(payload.get('activity_mode', {}).get('name', '⚖️ Нормально'))}</b>",
         f"AI-ведущий: <b>{h(payload.get('ai_leader', {}).get('status', 'выключен'))}</b>",
         "",
-        "Доступно: выборы, суд, драма, первый ивент, должности, итоги, промо, режим, переименование, сброс.",
+        "Управление районом, событиями и городским шумом.",
     ]
     if payload.get("officials"):
         lines.append("\n🧩 Должности:")
@@ -869,11 +906,28 @@ def render_owner_stats(payload: dict[str, Any]) -> str:
 
 def render_stars(payload: dict[str, Any]) -> str:
     status = "включены" if payload.get("enabled") else "выключены"
-    lines = [f"⭐ <b>Telegram Stars</b>", "", f"Статус: <b>{status}</b>", ""]
+    lines = [
+        "⭐ <b>Лавка Stars</b>",
+        "",
+        f"Статус: <b>{status}</b>",
+        "",
+        "Статус, косметика, AI-газета и общие события для района.",
+        "",
+    ]
     for item in payload.get("items", []):
-        lines.append(f"• {h(item['name'])} — <b>{item['stars']}</b> ⭐ · {h(item['text'])}")
+        lines.append(f"• <b>{h(item['name'])}</b> — <b>{item['stars']}</b> ⭐")
+        lines.append(f"  {h(item['text'])}")
     lines.append("\n" + h(payload.get("note", "")))
     return "\n".join(lines)
+
+
+def stars_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if enabled:
+        for key, spec in STARS_PRODUCTS.items():
+            rows.append([InlineKeyboardButton(text=f"{spec['name']} · {spec['stars']}⭐", callback_data=f"cc:stars_buy:{key}")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def render_ai_status(payload: dict[str, Any]) -> str:
@@ -883,7 +937,7 @@ def render_ai_status(payload: dict[str, Any]) -> str:
         f"Провайдер: <b>{h(payload.get('provider'))}</b>\n"
         f"Модель: <b>{h(payload.get('model'))}</b>\n"
         f"Лимит: <b>{payload.get('daily_limit')}</b> генераций на чат/день\n\n"
-        f"Если API выключен или ключа нет — бот спокойно работает на шаблонах. Не разваливается, уже приятно."
+        "Районная редакция работает по настроению города."
     )
 
 def render_activity_mode(payload: dict[str, Any]) -> str:
@@ -1521,9 +1575,26 @@ async def cmd_share(message: Message, bot: Bot) -> None:
     await perform_promo(message, bot)
 
 
-@router.message(Command("stars"))
+@router.message(Command("stars", "donate", "premium"))
 async def cmd_stars(message: Message) -> None:
     await perform_stars(message)
+
+
+@router.message(Command("titles"))
+async def cmd_titles(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "🏷 Титулы доступны в группе.")
+        return
+    await perform_title_market(message, message.from_user)
+
+
+@router.message(Command("buytitle"))
+async def cmd_buytitle(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "🏷 Титулы доступны в группе.")
+        return
+    key = (command.args or "").strip().lower()
+    await perform_buy_title(message, message.from_user, key)
 
 
 @router.message(Command("aistatus"))
@@ -1567,7 +1638,71 @@ async def perform_owner_stats(message: Message, user: Any | None) -> None:
 
 async def perform_stars(message: Message) -> None:
     payload = stars_products_payload()
-    await send_game_message(message, render_stars(payload), reply_markup=back_keyboard() if is_group(message) else None)
+    keyboard = stars_keyboard(bool(payload.get("enabled"))) if is_group(message) else None
+    await send_game_message(message, render_stars(payload), reply_markup=keyboard)
+
+
+async def perform_title_market(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        payload = title_market_payload(db, city, player)
+    await send_game_message(message, render_title_market(payload), reply_markup=title_market_keyboard())
+
+
+async def perform_buy_title(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    if not key:
+        await send_game_message(message, "🏷 Выбери титул в лавке.", reply_markup=title_market_keyboard())
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload = buy_title(db, city, player, key)
+    await send_game_message(message, text + "\n\n" + render_title_market(payload), reply_markup=title_market_keyboard())
+
+
+
+async def perform_stars_invoice(callback: CallbackQuery, product_key: str) -> None:
+    message = callback.message
+    user = callback.from_user
+    if not message or not user or not is_group(message):
+        await callback.answer("Лавка работает в городе.", show_alert=True)
+        return
+    settings = get_settings()
+    if not settings.stars_enabled:
+        await callback.answer("Магазин Stars пока закрыт.", show_alert=True)
+        return
+    spec = get_stars_product(product_key)
+    if not spec:
+        await callback.answer("Товар не найден.", show_alert=True)
+        return
+
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        invoice_payload = make_stars_payload(product_key, city, player)
+
+    prices = [LabeledPrice(label=str(spec["name"]), amount=int(spec["stars"]))]
+    await callback.answer()
+    await message.bot.send_invoice(
+        chat_id=message.chat.id,
+        title=str(spec["name"]),
+        description=str(spec["text"]),
+        payload=invoice_payload,
+        provider_token="",
+        currency="XTR",
+        prices=prices,
+    )
 
 
 async def perform_ai_status(message: Message) -> None:
@@ -2992,6 +3127,43 @@ async def cb_share(callback: CallbackQuery) -> None:
     await perform_promo(callback.message, callback.bot)
 
 
+@router.callback_query(F.data == "cc:title_market")
+async def cb_title_market(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_title_market(callback.message, callback.from_user)
+
+
+@router.callback_query(F.data.startswith("cc:title_buy:"))
+async def cb_title_buy(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    key = callback.data.split(":", 2)[2]
+    await callback.answer()
+    await perform_buy_title(callback.message, callback.from_user, key)
+
+
+@router.callback_query(F.data == "cc:donate")
+async def cb_donate(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_stars(callback.message)
+
+
+@router.callback_query(F.data.startswith("cc:stars_buy:"))
+async def cb_stars_buy(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    key = callback.data.split(":", 2)[2]
+    await perform_stars_invoice(callback, key)
+
+
 @router.callback_query(F.data == "cc:ai_status")
 async def cb_ai_status(callback: CallbackQuery) -> None:
     if not isinstance(callback.message, Message):
@@ -3009,6 +3181,47 @@ async def cb_global_top(callback: CallbackQuery) -> None:
     await callback.answer()
     await delete_callback_message(callback)
     await send_global_top(callback.message)
+
+
+
+@router.pre_checkout_query()
+async def on_pre_checkout_query(query: PreCheckoutQuery) -> None:
+    parsed = parse_stars_payload(query.invoice_payload or "")
+    if not parsed:
+        await query.answer(ok=False, error_message="Казначей не распознал платёж.")
+        return
+    spec = get_stars_product(parsed["product_key"])
+    if not spec:
+        await query.answer(ok=False, error_message="Товар не найден.")
+        return
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(message: Message) -> None:
+    payment = message.successful_payment
+    if not payment:
+        return
+    parsed = parse_stars_payload(payment.invoice_payload or "")
+    if not parsed:
+        await send_game_message(message, "⭐ Платёж получен, но казначей не распознал товар.")
+        return
+    with session_scope() as db:
+        city = db.get(City, int(parsed["city_id"]))
+        player = db.get(Player, int(parsed["player_id"]))
+        if not city or not player:
+            await send_game_message(message, "⭐ Платёж получен, но город не найден.")
+            return
+        ok, text = apply_stars_purchase(
+            db,
+            city,
+            player,
+            parsed["product_key"],
+            payment.invoice_payload,
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            provider_payment_charge_id=payment.provider_payment_charge_id,
+        )
+    await send_game_message(message, text, reply_markup=back_keyboard() if is_group(message) else None)
 
 
 @router.message(F.new_chat_members)

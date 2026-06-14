@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, CityStatus, Duel, DuelStatus, Membership, Player, War, utcnow
+from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, CityStatus, Duel, DuelStatus, Membership, Player, Purchase, PurchaseStatus, War, utcnow
 
 CITY_PREFIXES = [
     "Неоновый", "Шумный", "Подпольный", "Кибер", "Бешеный", "Сонный", "Золотой", "Пиксельный",
@@ -180,11 +180,69 @@ MISSIONS: dict[str, dict[str, Any]] = {
 }
 
 STARS_PRODUCTS: dict[str, dict[str, Any]] = {
-    "rename_city": {"name": "🏷 Переименование города", "stars": 25, "text": "косметическая смена названия"},
-    "premium_event": {"name": "🎭 Премиум-событие", "stars": 35, "text": "особый городской ивент без pay-to-win"},
-    "gold_title": {"name": "👑 Золотой титул", "stars": 50, "text": "косметический титул для понтов"},
-    "festival": {"name": "🎉 Праздник района", "stars": 75, "text": "красивый общий праздник для чата"},
+    "ai_newspaper": {
+        "name": "🗞 AI-газета",
+        "stars": 10,
+        "text": "один премиум-выпуск газеты с AI-ведущим",
+        "kind": "city",
+    },
+    "rename_city": {
+        "name": "🏷 Переименование города",
+        "stars": 15,
+        "text": "токен на косметическую смену названия города",
+        "kind": "city",
+    },
+    "premium_event": {
+        "name": "🎭 Большое событие",
+        "stars": 35,
+        "text": "запуск красивого события для всего чата без pay-to-win",
+        "kind": "city",
+    },
+    "city_style": {
+        "name": "🌆 Стиль города",
+        "stars": 45,
+        "text": "косметический стиль города для статуса и понтов",
+        "kind": "city",
+    },
+    "premium_title": {
+        "name": "👑 Премиум-титул",
+        "stars": 25,
+        "text": "косметический титул в профиле и топе",
+        "kind": "player",
+    },
+    "season_bundle": {
+        "name": "🏆 Сезонный набор",
+        "stars": 99,
+        "text": "трофей, праздник и косметика сезона для города",
+        "kind": "city",
+    },
 }
+
+TITLE_MARKET: dict[str, dict[str, Any]] = {
+    "batya": {"name": "Батя района", "cost": 120, "rep": 2},
+    "sus": {"name": "Официально подозрительный", "cost": 90, "rep": 1},
+    "banker": {"name": "Казначей без совести", "cost": 140, "rep": 2},
+    "legend_basement": {"name": "Легенда подвала", "cost": 110, "rep": 2},
+    "gray": {"name": "Серый кардинал", "cost": 160, "rep": 3},
+    "mayor_min": {"name": "Мэр на минималках", "cost": 130, "rep": 2},
+}
+
+PREMIUM_TITLE_POOL = [
+    "👑 Премиум-батя района",
+    "💎 Золотой подозреваемый",
+    "🕶 VIP-мутный тип",
+    "🏛 Почётный гражданин хаоса",
+    "🔥 Легенда раннего доступа",
+    "🗞 Главный герой газеты",
+]
+
+CITY_STYLE_POOL = [
+    "🌆 Неоновый район",
+    "🏛 Имперский двор",
+    "🌃 Ночная мэрия",
+    "🥇 Золотой подъезд",
+    "🧊 Холодная республика",
+]
 
 LEGENDARY_EVENTS = [
     "👑 В районе нашли древнюю корону. Никто не понял, чья она, но спорят все.",
@@ -788,6 +846,46 @@ def get_city_shop(city: City) -> dict[str, int]:
 
 def set_city_shop(city: City, items: dict[str, int]) -> None:
     city.shop_json = json.dumps(items, ensure_ascii=False, sort_keys=True)
+
+
+
+def get_city_premium(city: City) -> dict[str, Any]:
+    try:
+        data = json.loads(city.premium_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    clean: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            clean[str(key)] = value
+        elif isinstance(value, list):
+            clean[str(key)] = [str(item)[:80] for item in value[:20]]
+    return clean
+
+
+def set_city_premium(city: City, data: dict[str, Any]) -> None:
+    city.premium_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def add_city_premium_counter(city: City, key: str, amount: int = 1) -> int:
+    data = get_city_premium(city)
+    current = int(data.get(key, 0) or 0) + amount
+    data[key] = max(0, current)
+    set_city_premium(city, data)
+    return int(data[key])
+
+
+def city_premium_payload(city: City) -> dict[str, Any]:
+    data = get_city_premium(city)
+    return {
+        "style": data.get("style") or "обычный",
+        "ai_newspaper_tokens": int(data.get("ai_newspaper_tokens", 0) or 0),
+        "rename_tokens": int(data.get("rename_tokens", 0) or 0),
+        "premium_events": int(data.get("premium_events", 0) or 0),
+        "season_badge": data.get("season_badge") or "",
+    }
 
 
 def shop_payload(city: City) -> dict[str, Any]:
@@ -1579,6 +1677,8 @@ def admin_stats(db: Session) -> dict[str, Any]:
     duels_active = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.ACTIVE.value)) or 0
     duels_finished = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.FINISHED.value)) or 0
     black_market_actions = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "black_market", ActionLog.created_at >= since_day)) or 0
+    stars_purchases_day = db.scalar(select(func.count(Purchase.id)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
+    stars_total_day = db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
     action_count = func.count(ActionLog.id)
     top_action_row = db.execute(
         select(ActionLog.action, action_count.label("n"))
@@ -1603,6 +1703,8 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "duels_active": int(duels_active),
         "duels_finished": int(duels_finished),
         "black_market_actions": int(black_market_actions),
+        "stars_purchases_day": int(stars_purchases_day),
+        "stars_total_day": int(stars_total_day or 0),
         "top_action": {"action": top_action_row[0], "count": int(top_action_row[1])} if top_action_row else None,
         "top_city": top_city[0] if top_city else None,
     }
@@ -1715,6 +1817,7 @@ def city_payload(db: Session, city: City) -> dict[str, Any]:
         "factions_count": sum(item["count"] for item in faction_counts(db, city)),
         "season": season_payload(city),
         "shop": get_city_shop(city),
+        "premium": city_premium_payload(city),
         "created_at": city.created_at.isoformat(),
     }
 
@@ -2860,16 +2963,185 @@ def ai_context_payload(db: Session, city: City, kind: str = "газета") -> d
     }
 
 
+
+def title_market_payload(db: Session, city: City, player: Player) -> dict[str, Any]:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    current = player_title(player, membership) if membership else "Гость"
+    return {
+        "coins": player.coins,
+        "current_title": current,
+        "items": [
+            {"key": key, "name": spec["name"], "cost": int(spec["cost"]), "rep": int(spec.get("rep", 0))}
+            for key, spec in TITLE_MARKET.items()
+        ],
+    }
+
+
+def buy_title(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any]]:
+    if key not in TITLE_MARKET:
+        return False, "Такого титула нет. Табличку украли.", title_market_payload(db, city, player)
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала стань жителем города.", title_market_payload(db, city, player)
+    spec = TITLE_MARKET[key]
+    cost = int(spec["cost"])
+    if player.coins < cost:
+        return False, f"Не хватает монет. Нужно {cost}, у тебя {player.coins}.", title_market_payload(db, city, player)
+    player.coins -= cost
+    membership.civic_title = str(spec["name"])[:64]
+    membership.reputation += int(spec.get("rep", 0))
+    log(db, city.id, player.id, "title_buy", f"{display_player(player)} купил титул: {spec['name']}.")
+    add_city_history(city, f"{display_player(player)} купил титул: {spec['name']}.", "🏷")
+    db.flush()
+    return True, f"Титул куплен: {spec['name']}. Теперь можно ходить важным видом.", title_market_payload(db, city, player)
+
+
 def stars_products_payload() -> dict[str, Any]:
     settings = get_settings()
     return {
         "enabled": bool(settings.stars_enabled),
+        "currency": getattr(settings, "stars_currency", "XTR"),
         "items": [
-            {"key": key, "name": spec["name"], "stars": int(spec["stars"]), "text": spec["text"]}
+            {
+                "key": key,
+                "name": spec["name"],
+                "stars": int(spec["stars"]),
+                "text": spec["text"],
+                "kind": spec.get("kind", "city"),
+            }
             for key, spec in STARS_PRODUCTS.items()
         ],
-        "note": "Telegram Stars заготовлены как косметика/ивенты без pay-to-win. Реальные invoice-хендлеры можно подключить следующим шагом.",
+        "note": "Косметика, статусы и городские события. Баланс района не продаётся.",
     }
+
+
+def get_stars_product(product_key: str) -> dict[str, Any] | None:
+    return STARS_PRODUCTS.get((product_key or "").strip())
+
+
+def make_stars_payload(product_key: str, city: City, player: Player) -> str:
+    nonce = secrets.token_urlsafe(6).replace("-", "").replace("_", "")[:8]
+    return f"stars:{product_key}:{city.id}:{player.id}:{nonce}"
+
+
+def parse_stars_payload(payload: str) -> dict[str, Any] | None:
+    parts = (payload or "").split(":")
+    if len(parts) != 5 or parts[0] != "stars":
+        return None
+    product_key = parts[1]
+    if product_key not in STARS_PRODUCTS:
+        return None
+    try:
+        city_id = int(parts[2])
+        player_id = int(parts[3])
+    except ValueError:
+        return None
+    return {"product_key": product_key, "city_id": city_id, "player_id": player_id, "nonce": parts[4]}
+
+
+def record_stars_purchase(
+    db: Session,
+    city: City | None,
+    player: Player | None,
+    product_key: str,
+    payload: str,
+    stars_amount: int,
+    status: str = PurchaseStatus.PENDING.value,
+) -> Purchase:
+    purchase = Purchase(
+        city_id=city.id if city else None,
+        player_id=player.id if player else None,
+        product_key=product_key,
+        stars_amount=int(stars_amount),
+        status=status,
+        payload=payload[:160],
+    )
+    db.add(purchase)
+    db.flush()
+    return purchase
+
+
+def apply_stars_purchase(
+    db: Session,
+    city: City,
+    player: Player,
+    product_key: str,
+    payload: str,
+    telegram_payment_charge_id: str | None = None,
+    provider_payment_charge_id: str | None = None,
+) -> tuple[bool, str]:
+    spec = get_stars_product(product_key)
+    if not spec:
+        return False, "Платёж пришёл, но товар не найден. Казначей уже ищет бумаги."
+
+    if telegram_payment_charge_id:
+        existing = db.scalar(select(Purchase).where(Purchase.telegram_payment_charge_id == telegram_payment_charge_id))
+        if existing and existing.status == PurchaseStatus.PAID.value:
+            return True, existing.applied_text or "Покупка уже применена."
+
+    stars_amount = int(spec["stars"])
+    text = ""
+    premium = get_city_premium(city)
+
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        membership = Membership(city_id=city.id, player_id=player.id)
+        db.add(membership)
+        db.flush()
+
+    if product_key == "ai_newspaper":
+        tokens = int(premium.get("ai_newspaper_tokens", 0) or 0) + 1
+        premium["ai_newspaper_tokens"] = tokens
+        text = f"🗞 {display_player(player)} купил AI-газету. Токенов AI-газеты у города: {tokens}."
+    elif product_key == "rename_city":
+        tokens = int(premium.get("rename_tokens", 0) or 0) + 1
+        premium["rename_tokens"] = tokens
+        text = f"🏷 {display_player(player)} купил токен переименования города. Токенов: {tokens}."
+    elif product_key == "premium_event":
+        premium["premium_events"] = int(premium.get("premium_events", 0) or 0) + 1
+        city.xp += 25
+        city.treasury += 10
+        text = f"🎭 {display_player(player)} оплатил большое событие. Город получил +25 XP и +10 в казну."
+    elif product_key == "city_style":
+        style = random.choice(CITY_STYLE_POOL)
+        premium["style"] = style
+        trophy = award_trophy(city, f"🌆 Стиль: {style}")
+        text = f"🌆 {display_player(player)} купил стиль города: {style}. Трофей: {trophy}."
+    elif product_key == "premium_title":
+        title = random.choice(PREMIUM_TITLE_POOL)
+        membership.civic_title = title[:64]
+        membership.reputation += 3
+        text = f"👑 {display_player(player)} получил премиум-титул: {title}."
+    elif product_key == "season_bundle":
+        premium["season_badge"] = f"Сезонный набор {city.season_number}"
+        premium["premium_events"] = int(premium.get("premium_events", 0) or 0) + 1
+        premium["ai_newspaper_tokens"] = int(premium.get("ai_newspaper_tokens", 0) or 0) + 1
+        trophy = award_trophy(city, f"🏆 Сезонный набор {city.season_number}")
+        city.xp += 50
+        text = f"🏆 {display_player(player)} купил сезонный набор. Город получил трофей {trophy}, +50 XP, AI-газету и премиум-событие."
+    else:
+        text = f"⭐ Покупка применена: {spec['name']}."
+
+    set_city_premium(city, premium)
+    maybe_level_up(city)
+    purchase = Purchase(
+        city_id=city.id,
+        player_id=player.id,
+        product_key=product_key,
+        stars_amount=stars_amount,
+        status=PurchaseStatus.PAID.value,
+        payload=payload[:160],
+        telegram_payment_charge_id=telegram_payment_charge_id,
+        provider_payment_charge_id=provider_payment_charge_id,
+        applied_text=text,
+        paid_at=utcnow(),
+    )
+    db.add(purchase)
+    log(db, city.id, player.id, "stars_purchase", text)
+    add_city_history(city, text, "⭐")
+    db.flush()
+    return True, text
+
 
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:

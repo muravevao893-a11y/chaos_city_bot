@@ -34,6 +34,12 @@ class DuelStatus(StrEnum):
     DECLINED = "declined"
 
 
+class PurchaseStatus(StrEnum):
+    PENDING = "pending"
+    PAID = "paid"
+    FAILED = "failed"
+
+
 class City(Base):
     __tablename__ = "cities"
 
@@ -51,6 +57,7 @@ class City(Base):
     trophies_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     shop_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     history_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    premium_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     season_number: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     season_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_bot_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -168,6 +175,29 @@ class CityAlliance(Base):
     city_b_id: Mapped[int] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=AllianceStatus.ACTIVE.value, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+
+class Purchase(Base):
+    __tablename__ = "purchases"
+    __table_args__ = (
+        Index("ix_purchases_city_created", "city_id", "created_at"),
+        Index("ix_purchases_player_created", "player_id", "created_at"),
+        Index("ix_purchases_charge", "telegram_payment_charge_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    city_id: Mapped[int | None] = mapped_column(ForeignKey("cities.id", ondelete="SET NULL"), nullable=True)
+    player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id", ondelete="SET NULL"), nullable=True)
+    product_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    stars_amount: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=PurchaseStatus.PENDING.value, nullable=False)
+    payload: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    telegram_payment_charge_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    applied_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CityReferral(Base):

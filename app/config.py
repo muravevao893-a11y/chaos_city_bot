@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     ai_site_url: str = Field(default="https://t.me/", alias="AI_SITE_URL")
     ai_app_name: str = Field(default="Chatograd", alias="AI_APP_NAME")
     stars_enabled: bool = Field(default=False, alias="STARS_ENABLED")
+    stars_currency: str = Field(default="XTR", alias="STARS_CURRENCY")
     admin_ids: Annotated[List[int], NoDecode] = Field(default_factory=list, alias="ADMIN_IDS")
     enable_auto_events: bool = Field(default=True, alias="ENABLE_AUTO_EVENTS")
     auto_event_interval_minutes: int = Field(default=30, alias="AUTO_EVENT_INTERVAL_MINUTES")
