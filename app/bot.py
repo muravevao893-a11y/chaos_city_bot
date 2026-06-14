@@ -19,12 +19,24 @@ from app.game import (
     SHOP_ITEMS,
     BLACK_MARKET_ITEMS,
     APPOINTABLE_TITLES,
+    FACTIONS,
+    ITEMS,
     active_incoming_raids,
     admin_stats,
     appoint_city_official,
     buy_shop_item,
     buy_black_market_item,
     black_market_payload,
+    attempt_escape,
+    buy_item,
+    city_history_payload,
+    create_revolt_event,
+    faction_payload,
+    inventory_payload,
+    join_faction,
+    maybe_legendary_event,
+    steal_treasury,
+    use_item,
     build_city_building,
     build_newspaper,
     building_payload,
@@ -212,6 +224,10 @@ def move_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="⚔️ Дуэль", callback_data="cc:duel_help"),
+            InlineKeyboardButton(text="💰 Ограбить", callback_data="cc:steal"),
+        ],
+        [
+            InlineKeyboardButton(text="🔥 Бунт", callback_data="cc:revolt"),
             InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"),
         ],
         [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
@@ -240,7 +256,15 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🕶 Чёрный рынок", callback_data="cc:black_market"),
+            InlineKeyboardButton(text="🎒 Предметы", callback_data="cc:items"),
+        ],
+        [
+            InlineKeyboardButton(text="🧱 Фракции", callback_data="cc:factions"),
+            InlineKeyboardButton(text="📜 Летопись", callback_data="cc:history"),
+        ],
+        [
             InlineKeyboardButton(text="👑 Кабинет", callback_data="cc:founder_panel"),
+            InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape"),
         ],
         [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
@@ -542,6 +566,60 @@ def black_market_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+def render_factions(payload: dict[str, Any]) -> str:
+    lines = ["🧱 <b>Фракции района</b>", ""]
+    current = payload.get("current")
+    if current and current in FACTIONS:
+        lines.append(f"Твоя фракция: <b>{h(FACTIONS[current]['name'])}</b>\n")
+    else:
+        lines.append("Твоя фракция: <b>нет</b>\n")
+    for item in payload.get("factions", []):
+        lines.append(f"{h(item['name'])} · жителей: <b>{item['count']}</b>")
+        lines.append(f"└ {h(item['bonus'])}")
+    return "\n".join(lines)
+
+
+def factions_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, spec in FACTIONS.items():
+        rows.append([InlineKeyboardButton(text=str(spec["name"]), callback_data=f"cc:faction_join:{key}")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_inventory(payload: dict[str, Any]) -> str:
+    lines = ["🎒 <b>Предметы</b>", ""]
+    if payload.get("empty"):
+        lines.append("Пусто. Чёрный рынок уже ждёт твои монеты.")
+    else:
+        for item in payload.get("items", []):
+            lines.append(f"{h(item['name'])} × <b>{item['count']}</b>")
+            lines.append(f"└ {h(item['text'])}")
+    lines.append("")
+    lines.append(f"Монеты: <b>{payload.get('coins', 0)}</b>")
+    return "\n".join(lines)
+
+
+def items_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for key, spec in ITEMS.items():
+        rows.append([InlineKeyboardButton(text=f"Купить {spec['name']}", callback_data=f"cc:item_buy:{key}")])
+    rows.append([InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape")])
+    rows.append([InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def render_history(payload: dict[str, Any]) -> str:
+    lines = [f"📜 <b>Летопись: {h(payload.get('city', 'город'))}</b>", ""]
+    items = payload.get("items", [])
+    if not items:
+        lines.append("История пока пустая. Даже летописец скучает.")
+    else:
+        for item in items:
+            lines.append(f"{h(item.get('icon', '📜'))} {h(item.get('text', ''))}")
+    return "\n".join(lines)
 
 def duel_accept_keyboard(duel_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1057,6 +1135,73 @@ async def cmd_renamecity(message: Message, command: CommandObject) -> None:
     await perform_renamecity(message, command.args or "")
 
 
+@router.message(Command("factions"))
+async def cmd_factions(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Фракции доступны в группе.")
+        return
+    await perform_factions(message, message.from_user)
+
+
+@router.message(Command("faction"))
+async def cmd_faction(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Фракции доступны в группе.")
+        return
+    key = (command.args or "").strip().lower()
+    if key:
+        await perform_join_faction(message, message.from_user, key)
+    else:
+        await perform_factions(message, message.from_user)
+
+
+@router.message(Command("items"))
+async def cmd_items(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Предметы доступны в группе.")
+        return
+    await perform_items(message, message.from_user)
+
+
+@router.message(Command("useitem"))
+async def cmd_useitem(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Предметы доступны в группе.")
+        return
+    await perform_use_item(message, message.from_user, (command.args or "").strip().lower())
+
+
+@router.message(Command("escape"))
+async def cmd_escape(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Побег доступен в группе.")
+        return
+    await perform_escape(message, message.from_user)
+
+
+@router.message(Command("steal"))
+async def cmd_steal(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Казна доступна в группе.")
+        return
+    await perform_steal(message, message.from_user)
+
+
+@router.message(Command("revolt"))
+async def cmd_revolt(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Бунты доступны в группе.")
+        return
+    await perform_revolt(message, message.from_user)
+
+
+@router.message(Command("history"))
+async def cmd_history(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Летопись доступна в группе.")
+        return
+    await perform_history(message)
+
 
 async def perform_more(message: Message, user: Any | None = None) -> None:
     is_founder = False
@@ -1184,6 +1329,121 @@ async def perform_duel_accept(message: Message, user: Any | None, duel_id: int) 
         payload = city_payload(db, city)
     await send_game_message(message, f"⚔️ <b>Итог дуэли</b>\n\n{h(result.text)}\n\nКазна: <b>{payload['treasury']}</b> · уровень города: <b>{payload['level']}</b>", reply_markup=back_keyboard())
 
+
+async def perform_factions(message: Message, user: Any | None) -> None:
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id) if user else False
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player = None
+        if user and is_human_user(user):
+            player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+            join_city(db, city, player, is_chat_owner=owner)
+        payload = faction_payload(db, city, player)
+    await send_game_message(message, render_factions(payload), reply_markup=factions_keyboard())
+
+
+async def perform_join_faction(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload = join_faction(db, city, player, key)
+        maybe_legendary_event(db, city)
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_factions(payload), reply_markup=factions_keyboard())
+
+
+async def perform_items(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        payload = inventory_payload(db, city, player)
+    await send_game_message(message, render_inventory(payload), reply_markup=items_keyboard())
+
+
+async def perform_item_buy(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload = buy_item(db, city, player, key)
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_inventory(payload), reply_markup=items_keyboard())
+
+
+async def perform_use_item(message: Message, user: Any | None, key: str) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload = use_item(db, city, player, key)
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_inventory(payload), reply_markup=items_keyboard())
+
+
+async def perform_escape(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text, payload = attempt_escape(db, city, player)
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}\n\n" + render_inventory(payload), reply_markup=items_keyboard())
+
+
+async def perform_steal(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        ok, text = steal_treasury(db, city, player)
+        payload = city_payload(db, city)
+        legendary = maybe_legendary_event(db, city) if ok else None
+    extra = f"\n\n🌟 {h(legendary)}" if legendary else ""
+    prefix = "✅" if ok else "⛔"
+    await send_game_message(message, f"{prefix} {h(text)}{extra}\n\nКазна: <b>{payload['treasury']}</b>", reply_markup=move_keyboard())
+
+
+async def perform_revolt(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        event, text = create_revolt_event(db, city, player, force=True)
+        payload = event_payload(event) if event else None
+    if payload:
+        await send_game_message(message, f"🔥 <b>Бунт</b>\n\n{h(text)}\n\n" + render_event(payload), reply_markup=event_keyboard())
+    else:
+        await send_game_message(message, f"⛔ {h(text)}", reply_markup=move_keyboard())
+
+
+async def perform_history(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = city_history_payload(city)
+    await send_game_message(message, render_history(payload), reply_markup=back_keyboard())
 
 async def perform_founder_panel(message: Message, user: Any | None) -> None:
     if not user:
@@ -2058,6 +2318,87 @@ async def cb_season_roll(callback: CallbackQuery) -> None:
     await delete_callback_message(callback)
     await perform_season_roll(callback.message)  # type: ignore[arg-type]
 
+
+@router.callback_query(F.data == "cc:factions")
+async def cb_factions(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Фракции работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_factions(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data.startswith("cc:faction_join:"))
+async def cb_faction_join(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Фракции работают в группе.", show_alert=True)
+        return
+    key = (callback.data or "").split(":")[-1]
+    await callback.answer("Выбираем сторону…")
+    await delete_callback_message(callback)
+    await perform_join_faction(callback.message, callback.from_user, key)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:items")
+async def cb_items(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Предметы работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_items(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data.startswith("cc:item_buy:"))
+async def cb_item_buy(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Предметы работают в группе.", show_alert=True)
+        return
+    key = (callback.data or "").split(":")[-1]
+    await callback.answer("Покупаем…")
+    await delete_callback_message(callback)
+    await perform_item_buy(callback.message, callback.from_user, key)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:escape")
+async def cb_escape(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Побег работает в группе.", show_alert=True)
+        return
+    await callback.answer("Проверяем подвал…")
+    await delete_callback_message(callback)
+    await perform_escape(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:steal")
+async def cb_steal(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Казна работает в группе.", show_alert=True)
+        return
+    await callback.answer("Шуршим у казны…")
+    await delete_callback_message(callback)
+    await perform_steal(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:revolt")
+async def cb_revolt(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Бунт работает в группе.", show_alert=True)
+        return
+    await callback.answer("Раскачиваем район…")
+    await delete_callback_message(callback)
+    await perform_revolt(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:history")
+async def cb_history(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Летопись работает в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_history(callback.message)  # type: ignore[arg-type]
 
 @router.callback_query(F.data == "cc:global_top")
 async def cb_global_top(callback: CallbackQuery) -> None:

@@ -120,6 +120,31 @@ BLACK_MARKET_ITEMS: dict[str, dict[str, Any]] = {
     },
 }
 
+FACTIONS: dict[str, dict[str, Any]] = {
+    "workers": {"name": "🧱 Работяги", "bonus": "больше дохода за работу и строительство"},
+    "mafia": {"name": "🕶 Мафия", "bonus": "лучше кражи и мутные дуэли"},
+    "bankers": {"name": "🏦 Банкиры", "bonus": "больше монет и защита казны"},
+    "press": {"name": "📰 Пресса", "bonus": "сильнее слухи и репутация за движ"},
+    "law": {"name": "⚖️ Законники", "bonus": "лучше суды и меньше штрафов"},
+    "rebels": {"name": "🔥 Бунтари", "bonus": "сильнее бунты и побеги"},
+}
+
+ITEMS: dict[str, dict[str, Any]] = {
+    "lockpick": {"name": "🔑 Ключ от подвала", "text": "даёт шанс выбраться из подвала"},
+    "immunity": {"name": "🛡 Иммунитет суда", "text": "смягчает следующий штраф/подвал"},
+    "compromat": {"name": "📜 Компромат", "text": "бьёт по репутации случайного соперника"},
+    "smoke": {"name": "💨 Дымовая шашка", "text": "помогает при краже казны"},
+    "fake_crown": {"name": "👑 Фальшивая корона", "text": "даёт влияние и смешной статус"},
+}
+
+LEGENDARY_EVENTS = [
+    "👑 В районе нашли древнюю корону. Никто не понял, чья она, но спорят все.",
+    "🛸 НЛО пролетело над мэрией и забрало отчётность. Казна облегчённо выдохнула.",
+    "🐈 Кот сел на документы и стал временным советником города.",
+    "💸 Казна внезапно выросла. Казначей просит не задавать вопросов.",
+    "🔥 Народ случайно устроил праздник вместо собрания. Эффективность выросла.",
+]
+
 SHOP_ITEMS: dict[str, dict[str, Any]] = {
     "festival": {
         "name": "🎉 Районный праздник",
@@ -425,6 +450,7 @@ def get_or_create_city(db: Session, chat_id: int, title: str | None) -> tuple[Ci
     db.add(city)
     db.flush()
     log(db, city.id, None, "city_created", f"Город {city.name} основан.")
+    add_city_history(city, f"Город {city.name} основан.", "🏙")
     return city, True
 
 
@@ -761,6 +787,8 @@ def player_profile(db: Session, city: City, player: Player) -> dict[str, Any]:
         "xp_for_next": level_info["xp_for_next"],
         "daily_streak": int(player.daily_streak or 0),
         "daily_available": not _same_utc_day(player.last_daily_at),
+        "faction": FACTIONS.get(membership.faction, {}).get("name") if membership and membership.faction else "нет",
+        "inventory_count": sum(get_inventory(membership).values()) if membership else 0,
         "influence": membership.influence if membership else 0,
         "reputation": membership.reputation if membership else 0,
         "status": membership_status(membership),
@@ -825,6 +853,17 @@ def work(db: Session, city: City, player: Player, cooldown_hours: int = 4) -> Wo
     coins = base_coins + bonus
     xp = base_xp + random.randint(0, 5)
     treasury = base_treasury + random.randint(0, 3)
+
+    if membership and membership.faction == "workers":
+        coins += 3
+        xp += 2
+    elif membership and membership.faction == "bankers":
+        coins += 2
+        treasury += 2
+    elif membership and membership.faction == "press":
+        xp += 3
+    elif membership and membership.faction == "law":
+        treasury += 1
 
     if jailed:
         coins = max(1, coins // 2)
@@ -964,6 +1003,7 @@ def resolve_event(db: Session, city: City) -> str:
                 trophy = award_trophy(city, "👑 Корона спорной легитимности")
                 special_line = f"\n👑 Новый мэр: {display_player(candidate)}. Трофей города: {trophy}."
                 log(db, city.id, candidate.id, "mayor_elected", f"{display_player(candidate)} избран мэром города.")
+                add_city_history(city, f"{display_player(candidate)} избран мэром города.", "👑")
 
     if event.event_key.startswith("court:"):
         try:
@@ -995,6 +1035,30 @@ def resolve_event(db: Session, city: City) -> str:
                 membership.reputation -= 2
                 special_line = f"\n💰 {display_player(target)} оштрафован на {fine} монет. Казна довольно хрюкнула."
                 log(db, city.id, target.id, "court_fine", f"{display_player(target)} оштрафован на {fine} монет.")
+
+    if event.event_key == "revolt":
+        if winner == 1:
+            affected = db.scalars(
+                select(Membership).where(Membership.city_id == city.id, Membership.civic_title.like("%Мэр%"))
+            ).all()
+            for item in affected:
+                item.civic_title = None
+                item.reputation = max(-50, item.reputation - 8)
+            city.threat += 3
+            city.xp += 25
+            trophy = award_trophy(city, "🔥 Печать переворота")
+            special_line = f"\n🔥 Бунт победил. Старую власть снесло сквозняком. Трофей: {trophy}."
+            add_city_history(city, "Бунт победил. Власть была свергнута.", "🔥")
+        elif winner == 2:
+            city.threat = max(0, city.threat - 2)
+            city.treasury += 15
+            special_line = "\n🛡 Порядок устоял. Мэрия делает вид, что контролировала ситуацию."
+            add_city_history(city, "Бунт подавлен. Порядок устоял.", "🛡")
+        else:
+            city.treasury += 8
+            city.xp += 18
+            special_line = "\n🎉 Бунт превратили в районный праздник. Политика проиграла шаурме."
+            add_city_history(city, "Бунт стал районным праздником.", "🎉")
 
     log(db, city.id, None, "resolve_event", f"Событие решено: {options[winner]}")
     return (
@@ -1492,6 +1556,8 @@ def city_payload(db: Session, city: City) -> dict[str, Any]:
         "trophies": get_city_trophies(city),
         "alliances_count": city_alliance_count(db, city.id),
         "referrals_count": city_referral_count(db, city.id),
+        "history_count": len(_safe_json_list(city.history_json)),
+        "factions_count": sum(item["count"] for item in faction_counts(db, city)),
         "season": season_payload(city),
         "shop": get_city_shop(city),
         "created_at": city.created_at.isoformat(),
@@ -1891,6 +1957,336 @@ def rename_city(db: Session, city: City, new_name: str) -> tuple[bool, str]:
     db.flush()
     return True, f"Город переименован: {old} → {clean}."
 
+
+# ---- v1.0: factions, revolts, thefts, items, history ----
+
+
+def _safe_json_dict(raw: str | None) -> dict[str, int]:
+    try:
+        data = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in data.items():
+        try:
+            amount = int(value)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            out[str(key)] = amount
+    return out
+
+
+def _safe_json_list(raw: str | None) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def get_inventory(membership: Membership | None) -> dict[str, int]:
+    if not membership:
+        return {}
+    data = _safe_json_dict(membership.inventory_json)
+    return {key: value for key, value in data.items() if key in ITEMS}
+
+
+def set_inventory(membership: Membership, inventory: dict[str, int]) -> None:
+    clean = {key: int(value) for key, value in inventory.items() if key in ITEMS and int(value) > 0}
+    membership.inventory_json = json.dumps(clean, ensure_ascii=False, sort_keys=True)
+
+
+def give_item(membership: Membership, key: str, amount: int = 1) -> bool:
+    if key not in ITEMS:
+        return False
+    inventory = get_inventory(membership)
+    inventory[key] = inventory.get(key, 0) + max(1, int(amount))
+    set_inventory(membership, inventory)
+    return True
+
+
+def consume_item(membership: Membership, key: str) -> bool:
+    inventory = get_inventory(membership)
+    if inventory.get(key, 0) <= 0:
+        return False
+    inventory[key] -= 1
+    set_inventory(membership, inventory)
+    return True
+
+
+def add_city_history(city: City, text: str, icon: str = "📜") -> None:
+    history = _safe_json_list(city.history_json)
+    entry = {"at": utcnow().isoformat(), "icon": icon, "text": str(text)[:180]}
+    history.append(entry)
+    city.history_json = json.dumps(history[-35:], ensure_ascii=False)
+
+
+def city_history_payload(city: City, limit: int = 12) -> dict[str, Any]:
+    history = _safe_json_list(city.history_json)
+    return {"city": city.name, "items": list(reversed(history[-limit:]))}
+
+
+def faction_counts(db: Session, city: City) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(Membership.faction, func.count(Membership.id))
+        .where(Membership.city_id == city.id, Membership.faction.is_not(None))
+        .group_by(Membership.faction)
+    ).all()
+    counts = {str(key): int(value) for key, value in rows if key}
+    return [
+        {"key": key, "name": spec["name"], "bonus": spec["bonus"], "count": counts.get(key, 0)}
+        for key, spec in FACTIONS.items()
+    ]
+
+
+def faction_payload(db: Session, city: City, player: Player | None = None) -> dict[str, Any]:
+    membership = None
+    if player:
+        membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    return {
+        "city": city.name,
+        "current": membership.faction if membership else None,
+        "factions": faction_counts(db, city),
+    }
+
+
+def join_faction(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any]]:
+    key = (key or "").strip().lower()
+    if key not in FACTIONS:
+        return False, "Такой фракции нет. Подъездная геополитика не принимает самодеятельность.", faction_payload(db, city, player)
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город.", faction_payload(db, city, player)
+    if membership.faction == key:
+        return False, f"Ты уже во фракции {FACTIONS[key]['name']}.", faction_payload(db, city, player)
+    old = membership.faction
+    membership.faction = key
+    membership.reputation += 2
+    membership.influence += 1
+    city.xp += 8
+    maybe_level_up(city)
+    text = f"{display_player(player)} вступил во фракцию {FACTIONS[key]['name']}."
+    if old and old in FACTIONS:
+        text = f"{display_player(player)} перешёл из {FACTIONS[old]['name']} во фракцию {FACTIONS[key]['name']}."
+    log(db, city.id, player.id, "faction_join", text)
+    add_city_history(city, text, "🧱")
+    db.flush()
+    return True, text, faction_payload(db, city, player)
+
+
+def inventory_payload(db: Session, city: City, player: Player) -> dict[str, Any]:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    inventory = get_inventory(membership)
+    items = [
+        {"key": key, "name": ITEMS[key]["name"], "text": ITEMS[key]["text"], "count": count}
+        for key, count in inventory.items()
+        if key in ITEMS and count > 0
+    ]
+    return {"items": items, "empty": not items, "coins": player.coins}
+
+
+def buy_item(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any]]:
+    prices = {"lockpick": 45, "immunity": 70, "compromat": 55, "smoke": 40, "fake_crown": 65}
+    key = (key or "").strip().lower()
+    if key not in ITEMS:
+        return False, "Такого предмета нет.", inventory_payload(db, city, player)
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город.", inventory_payload(db, city, player)
+    cost = prices.get(key, 50)
+    if player.coins < cost:
+        return False, f"Нужно {cost} монет. У тебя {player.coins}.", inventory_payload(db, city, player)
+    player.coins -= cost
+    give_item(membership, key)
+    membership.reputation += 1 if key != "compromat" else -1
+    city.xp += 4
+    text = f"{display_player(player)} купил предмет: {ITEMS[key]['name']}."
+    log(db, city.id, player.id, "item_buy", text)
+    db.flush()
+    return True, text, inventory_payload(db, city, player)
+
+
+def use_item(db: Session, city: City, player: Player, key: str) -> tuple[bool, str, dict[str, Any]]:
+    key = (key or "").strip().lower()
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город.", inventory_payload(db, city, player)
+    if key not in ITEMS:
+        return False, "Такого предмета нет.", inventory_payload(db, city, player)
+    if not consume_item(membership, key):
+        return False, "У тебя нет такого предмета.", inventory_payload(db, city, player)
+
+    text = f"{display_player(player)} использовал {ITEMS[key]['name']}."
+    if key == "lockpick":
+        jailed = _aware(membership.jailed_until)
+        if jailed and utcnow() < jailed:
+            membership.jailed_until = None
+            membership.reputation += 3
+            text = f"{display_player(player)} открыл подвал ключом и вышел красиво."
+        else:
+            membership.reputation += 1
+            text = f"{display_player(player)} покрутил ключом от подвала. Сейчас не пригодился, но вид солидный."
+    elif key == "immunity":
+        membership.reputation += 4
+        membership.influence += 1
+        text = f"{display_player(player)} активировал иммунитет суда. Район делает вид, что всё законно."
+    elif key == "compromat":
+        victims = [p for p in _city_players(db, city, limit=20) if p.id != player.id]
+        if victims:
+            victim = random.choice(victims)
+            victim_mem = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == victim.id))
+            if victim_mem:
+                victim_mem.reputation = max(-50, victim_mem.reputation - 7)
+            text = f"{display_player(player)} слил компромат на {display_player(victim)}. Репутация пошатнулась."
+        else:
+            text = f"{display_player(player)} хотел слить компромат, но в районе слишком пусто."
+    elif key == "smoke":
+        membership.reputation += 1
+        membership.influence += 1
+        text = f"{display_player(player)} задымил район. Следующий мутный движ будет выглядеть убедительнее."
+    elif key == "fake_crown":
+        membership.influence += 3
+        membership.reputation -= 1
+        membership.civic_title = "👑 Фальшивый принц"
+        text = f"{display_player(player)} надел фальшивую корону. Никто не поверил, но влияние выросло."
+    log(db, city.id, player.id, "item_use", text)
+    add_city_history(city, text, "🎒")
+    db.flush()
+    return True, text, inventory_payload(db, city, player)
+
+
+def attempt_escape(db: Session, city: City, player: Player) -> tuple[bool, str, dict[str, Any]]:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город.", inventory_payload(db, city, player)
+    jailed = _aware(membership.jailed_until)
+    if not jailed or utcnow() >= jailed:
+        return False, "Ты не в подвале. Бежать неоткуда, герой.", inventory_payload(db, city, player)
+    chance = 35 + (8 if membership.faction == "rebels" else 0) + (10 if get_inventory(membership).get("lockpick", 0) else 0)
+    if random.randint(1, 100) <= chance:
+        if get_inventory(membership).get("lockpick", 0):
+            consume_item(membership, "lockpick")
+        membership.jailed_until = None
+        membership.reputation += 5
+        membership.civic_title = "🕳 Беглец района"
+        text = f"{display_player(player)} сбежал из подвала и получил титул Беглец района."
+        add_city_history(city, text, "🕳")
+        ok = True
+    else:
+        membership.jailed_until = jailed + timedelta(minutes=45)
+        membership.reputation -= 2
+        text = f"{display_player(player)} попытался сбежать, но застрял в легенде. Подвал продлён на 45 минут."
+        ok = False
+    log(db, city.id, player.id, "escape", text)
+    db.flush()
+    return ok, text, inventory_payload(db, city, player)
+
+
+def steal_treasury(db: Session, city: City, player: Player) -> tuple[bool, str]:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False, "Сначала вступи в город. Казна чужаков не обслуживает."
+    now = utcnow()
+    last = _aware(membership.last_steal_at)
+    if last and now < last + timedelta(hours=6):
+        left = int(((last + timedelta(hours=6)) - now).total_seconds() // 60) + 1
+        return False, f"Ограбление уже было. Следующая попытка через {left} мин."
+    if city.treasury < 10:
+        return False, "Казна слишком пустая. Даже вор посмотрел и ушёл."
+
+    membership.last_steal_at = now
+    buildings = get_city_buildings(city)
+    police = buildings.get("police", 0)
+    bank = buildings.get("bank", 0)
+    inventory = get_inventory(membership)
+    chance = 38 + membership.reputation // 4 + (12 if membership.faction == "mafia" else 0) + (10 if inventory.get("smoke", 0) else 0) - police * 7 - bank * 4
+    chance = max(10, min(75, chance))
+    amount = max(5, min(city.treasury // 3, random.randint(8, 25 + city.level * 3)))
+    if random.randint(1, 100) <= chance:
+        if inventory.get("smoke", 0):
+            consume_item(membership, "smoke")
+        city.treasury -= amount
+        player.coins += amount
+        membership.reputation -= 3
+        membership.influence += 1
+        text = f"{display_player(player)} вынес из казны {amount} монет и сделал вид, что это аудит."
+        ok = True
+    else:
+        fine = min(player.coins, max(5, amount // 2))
+        player.coins -= fine
+        city.treasury += fine
+        membership.reputation -= 6
+        membership.convictions += 1
+        membership.jailed_until = now + timedelta(hours=2)
+        text = f"{display_player(player)} попался на попытке ограбить казну. Штраф {fine}, подвал на 2 часа."
+        ok = False
+    city.xp += 8
+    maybe_level_up(city)
+    log(db, city.id, player.id, "steal", text)
+    add_city_history(city, text, "💰")
+    db.flush()
+    return ok, text
+
+
+def create_revolt_event(db: Session, city: City, player: Player | None = None, force: bool = True) -> tuple[CityEvent | None, str]:
+    if player:
+        membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+        if membership:
+            last = _aware(membership.last_revolt_at)
+            if last and utcnow() < last + timedelta(hours=8):
+                left = int(((last + timedelta(hours=8)) - utcnow()).total_seconds() // 60) + 1
+                return None, f"Ты уже мутил бунт. Следующий через {left} мин."
+            membership.last_revolt_at = utcnow()
+    active = get_active_event(db, city)
+    if active and not force:
+        return active, "В городе уже есть активное событие."
+    if active and force:
+        active.resolved_at = utcnow()
+    players = _city_players(db, city, limit=10)
+    mayor = None
+    for p in players:
+        m = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == p.id))
+        if m and m.civic_title and "Мэр" in m.civic_title:
+            mayor = p
+            break
+    target = display_player(mayor) if mayor else "действующая власть"
+    starter = display_player(player) if player else "народ"
+    event = CityEvent(
+        city_id=city.id,
+        event_key="revolt",
+        title="Бунт у мэрии",
+        text=f"{starter} раскачивает район. Цель: {target}. Народ требует решить, кто тут главный.",
+        option_1="Свергнуть власть",
+        option_2="Защитить порядок",
+        option_3="Превратить в праздник",
+        votes_json="{}",
+    )
+    db.add(event)
+    city.threat += 2
+    city.xp += 6
+    log(db, city.id, player.id if player else None, "revolt", f"В городе начался бунт против власти.")
+    add_city_history(city, f"Начался бунт против власти. Инициатор: {starter}.", "🔥")
+    db.flush()
+    return event, "Бунт начался. Район выбирает судьбу власти."
+
+
+def maybe_legendary_event(db: Session, city: City) -> str | None:
+    # Cheap and rare: call only after significant manual actions.
+    if random.random() > 0.025:
+        return None
+    text = random.choice(LEGENDARY_EVENTS)
+    city.xp += 20
+    city.treasury += random.randint(5, 25)
+    trophy = award_trophy(city, "🌟 Легенда района")
+    add_city_history(city, f"{text} Трофей: {trophy}", "🌟")
+    log(db, city.id, None, "legendary", text)
+    db.flush()
+    return text
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:
     """Validate Telegram Mini App initData using BOT_TOKEN, return parsed data if valid."""
