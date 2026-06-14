@@ -56,7 +56,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Chatograd Bot",
         description="Telegram-only group city game: buttons, quests, newspaper, elections, drama, voting, economy and raids.",
-        version="0.7.2-railway",
+        version="1.1",
         lifespan=lifespan,
     )
     app.add_middleware(

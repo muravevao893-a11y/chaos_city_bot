@@ -22,6 +22,9 @@ from app.game import (
     FACTIONS,
     ITEMS,
     active_incoming_raids,
+    ACTIVITY_MODES,
+    achievement_payload,
+    activity_mode_payload,
     admin_stats,
     appoint_city_official,
     buy_shop_item,
@@ -53,6 +56,7 @@ from app.game import (
     create_raid_challenge,
     create_rumor_event,
     daily_payload,
+    daily_summary_payload,
     display_player,
     event_payload,
     find_city_player_by_username,
@@ -80,6 +84,8 @@ from app.game import (
     city_alliances,
     create_city_alliance,
     register_city_referral,
+    set_city_activity_mode,
+    should_send_daily_summary,
     work,
 )
 from app.models import City
@@ -260,6 +266,10 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🧱 Фракции", callback_data="cc:factions"),
+            InlineKeyboardButton(text="🏆 Достижения", callback_data="cc:achievements"),
+        ],
+        [
+            InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary"),
             InlineKeyboardButton(text="📜 Летопись", callback_data="cc:history"),
         ],
         [
@@ -327,6 +337,7 @@ def render_city_status(payload: dict[str, Any], created: bool = False) -> str:
         f"Сила: <b>{payload['power']}</b> · Угроза: <b>{payload['threat']}</b>\n"
         f"Постройки: {building_line}\n"
         f"Трофеи: {trophy_line}\n"
+        f"Режим: <b>{h(payload.get('activity_mode', {}).get('name', '⚖️ Нормально'))}</b>\n"
         f"Код рейдов: <code>{h(payload['invite_code'])}</code>"
     )
 
@@ -403,7 +414,7 @@ def render_profile(payload: dict[str, Any]) -> str:
         f"Уровень: <b>{payload['level']}</b> · XP: <b>{payload['xp_in_level']}</b>/<b>{payload['xp_for_next']}</b>\n"
         f"Монеты: <b>{payload['coins']}</b> · Серия: <b>{payload['daily_streak']}</b> дней · Награда: <b>{daily}</b>\n"
         f"Влияние: <b>{payload['influence']}</b> · Репутация: <b>{payload['reputation']}</b>\n"
-        f"Судимости: <b>{payload['convictions']}</b>"
+        f"Судимости: <b>{payload['convictions']}</b> · Достижения: <b>{payload.get('achievements_count', 0)}</b>"
     )
 
 
@@ -511,6 +522,7 @@ def render_admin_stats(payload: dict[str, Any]) -> str:
         f"Жителей в городах: <b>{payload['memberships_total']}</b>",
         f"Активных игроков за 24ч: <b>{payload['active_players_day']}</b>",
         f"Действий за 24ч: <b>{payload['actions_day']}</b>",
+        f"Активных городов за 24ч: <b>{payload.get('active_cities_day', 0)}</b>",
         f"Новых городов за 24ч: <b>{payload['new_cities_day']}</b>",
         f"Реферальных городов: <b>{payload['referrals_total']}</b>",
         f"Союзов: <b>{payload['alliances_total']}</b>",
@@ -647,6 +659,12 @@ def founder_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
             InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
         ],
+        [InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary")],
+        [
+            InlineKeyboardButton(text="🔕 Тихо", callback_data="cc:mode:quiet"),
+            InlineKeyboardButton(text="⚖️ Норм", callback_data="cc:mode:normal"),
+            InlineKeyboardButton(text="🔥 Хаос", callback_data="cc:mode:chaos"),
+        ],
         [InlineKeyboardButton(text="🏷 Переименовать: /renamecity новое имя", callback_data="cc:rename_help")],
         [InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")],
     ])
@@ -659,8 +677,9 @@ def render_founder_panel(payload: dict[str, Any]) -> str:
         "",
         f"Город: <b>{h(city['name'])}</b>",
         f"Казна: <b>{city['treasury']}</b> · жители <b>{city['population']}</b> · сила <b>{city['power']}</b>",
+        f"Режим: <b>{h(payload.get('activity_mode', {}).get('name', '⚖️ Нормально'))}</b>",
         "",
-        "Доступно: выборы, суд, драма, должности, переименование.",
+        "Доступно: выборы, суд, драма, должности, итоги дня, режим активности, переименование.",
     ]
     if payload.get("officials"):
         lines.append("\n🧩 Должности:")
@@ -670,6 +689,64 @@ def render_founder_panel(payload: dict[str, Any]) -> str:
         lines.append("\n📜 Последнее:")
         for item in payload["recent_logs"][:3]:
             lines.append(f"• {h(item['text'])}")
+    return "\n".join(lines)
+
+
+
+def render_achievements(payload: dict[str, Any]) -> str:
+    lines = [f"🏆 <b>Достижения</b> — {payload.get('owned_count', 0)}/{payload.get('total_count', 0)}", ""]
+    items = payload.get("items") or []
+    if items:
+        lines.append("Открыто:")
+        for item in items[:10]:
+            lines.append(f"• {h(item['name'])} — {h(item['text'])}")
+    else:
+        lines.append("Пока пусто. Район ещё не понял, с кем связался.")
+    locked = payload.get("locked") or []
+    if locked:
+        lines.append("\nБлижайшие закрытые:")
+        for item in locked[:5]:
+            lines.append(f"• 🔒 {h(item['name'])}")
+    return "\n".join(lines)
+
+
+def render_day_summary(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    lines = [
+        f"📊 <b>Итоги дня: {h(city['name'])}</b>",
+        "",
+        f"🏙 {h(city.get('rank', 'Подъезд'))} · ур. <b>{city['level']}</b> · казна <b>{city['treasury']}</b> · жители <b>{city['population']}</b>",
+    ]
+    if payload.get("richest"):
+        item = payload["richest"]
+        lines.append(f"💰 Богач дня: <b>{h(item['name'])}</b> · {item['coins']} монет")
+    if payload.get("suspect"):
+        item = payload["suspect"]
+        lines.append(f"🕵️ Подозреваемый дня: <b>{h(item['name'])}</b> · судимости {item['convictions']}")
+    if payload.get("top"):
+        hero = payload["top"][0]
+        lines.append(f"⭐ Герой дня: <b>{h(hero['name'])}</b> — {h(hero['title'])}")
+    if payload.get("actions"):
+        lines.append("\n🔥 Что делали:")
+        for item in payload["actions"]:
+            lines.append(f"• {h(item['action'])}: <b>{item['count']}</b>")
+    if payload.get("logs"):
+        lines.append("\n🗞 Главное:")
+        for item in payload["logs"][:5]:
+            lines.append(f"• {h(item['text'])}")
+    return "\n".join(lines)
+
+
+def render_activity_mode(payload: dict[str, Any]) -> str:
+    lines = [
+        "⚙️ <b>Режим активности</b>",
+        "",
+        f"Сейчас: <b>{h(payload['name'])}</b>",
+        f"Автособытия: примерно раз в <b>{payload['hours']}</b> ч.",
+        f"Описание: {h(payload['text'])}",
+        "",
+        "Менять может только владелец чата.",
+    ]
     return "\n".join(lines)
 
 
@@ -1195,6 +1272,30 @@ async def cmd_revolt(message: Message) -> None:
     await perform_revolt(message, message.from_user)
 
 
+@router.message(Command("achievements", "achieve"))
+async def cmd_achievements(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Достижения доступны в группе.")
+        return
+    await perform_achievements(message, message.from_user)
+
+
+@router.message(Command("day", "daysummary"))
+async def cmd_day_summary(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Итоги дня доступны в группе.")
+        return
+    await perform_day_summary(message)
+
+
+@router.message(Command("mode"))
+async def cmd_mode(message: Message, command: CommandObject) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Режимы доступны в группе.")
+        return
+    await perform_activity_mode(message, message.from_user, (command.args or "").strip().lower())
+
+
 @router.message(Command("history"))
 async def cmd_history(message: Message) -> None:
     if not is_group(message):
@@ -1437,6 +1538,42 @@ async def perform_revolt(message: Message, user: Any | None) -> None:
         await send_game_message(message, f"🔥 <b>Бунт</b>\n\n{h(text)}\n\n" + render_event(payload), reply_markup=event_keyboard())
     else:
         await send_game_message(message, f"⛔ {h(text)}", reply_markup=move_keyboard())
+
+
+async def perform_achievements(message: Message, user: Any | None) -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        join_city(db, city, player, is_chat_owner=owner)
+        payload = achievement_payload(db, city, player)
+    await send_game_message(message, render_achievements(payload), reply_markup=back_keyboard())
+
+
+async def perform_day_summary(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = daily_summary_payload(db, city)
+    await send_game_message(message, render_day_summary(payload), reply_markup=back_keyboard())
+
+
+async def perform_activity_mode(message: Message, user: Any | None, mode: str = "") -> None:
+    if not user:
+        return
+    owner = await is_user_chat_owner(message.bot, message.chat.id, user.id)
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        current = activity_mode_payload(city)
+        if mode:
+            if not owner:
+                await send_game_message(message, "⛔ Режим активности меняет только владелец чата.", reply_markup=back_keyboard())
+                return
+            _ok, text, current = set_city_activity_mode(db, city, mode)
+            await send_game_message(message, h(text) + "\n\n" + render_activity_mode(current), reply_markup=founder_keyboard())
+            return
+    await send_game_message(message, render_activity_mode(current), reply_markup=founder_keyboard() if owner else back_keyboard())
 
 
 async def perform_history(message: Message) -> None:
@@ -2391,6 +2528,37 @@ async def cb_revolt(callback: CallbackQuery) -> None:
     await perform_revolt(callback.message, callback.from_user)  # type: ignore[arg-type]
 
 
+
+@router.callback_query(F.data == "cc:achievements")
+async def cb_achievements(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Достижения работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_achievements(callback.message, callback.from_user)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data == "cc:day_summary")
+async def cb_day_summary(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Итоги дня работают в группе.", show_alert=True)
+        return
+    await callback.answer()
+    await delete_callback_message(callback)
+    await perform_day_summary(callback.message)  # type: ignore[arg-type]
+
+
+@router.callback_query(F.data.startswith("cc:mode:"))
+async def cb_activity_mode(callback: CallbackQuery) -> None:
+    if not is_group_callback(callback):
+        await callback.answer("Режимы работают в группе.", show_alert=True)
+        return
+    mode = (callback.data or "").split(":")[-1]
+    await callback.answer("Меняем режим…")
+    await delete_callback_message(callback)
+    await perform_activity_mode(callback.message, callback.from_user, mode)  # type: ignore[arg-type]
+
 @router.callback_query(F.data == "cc:history")
 async def cb_history(callback: CallbackQuery) -> None:
     if not is_group_callback(callback):
@@ -2455,21 +2623,34 @@ async def auto_event_loop(bot: Bot) -> None:
     while True:
         try:
             events_to_send: list[tuple[int, dict[str, Any]]] = []
+            summaries_to_send: list[tuple[int, dict[str, Any]]] = []
             with session_scope() as db:
-                cities = db.scalars(select(City).order_by(City.updated_at.desc()).limit(200)).all()
+                cities = db.scalars(select(City).order_by(City.updated_at.desc()).limit(250)).all()
                 for city in cities:
                     if city_population(db, city.id) < settings.auto_event_min_population:
                         continue
+                    if should_send_daily_summary(city):
+                        summaries_to_send.append((city.chat_id, daily_summary_payload(db, city)))
                     event = create_new_event_if_due(db, city)
                     payload = event_payload(event) if event else None
                     if payload:
                         events_to_send.append((city.chat_id, payload))
+            for chat_id, payload in summaries_to_send:
+                try:
+                    await send_managed_bot_message(
+                        bot,
+                        chat_id,
+                        render_day_summary(payload),
+                        reply_markup=back_keyboard(),
+                    )
+                except Exception:
+                    logger.exception("Cannot send daily summary to chat %s", chat_id)
             for chat_id, payload in events_to_send:
                 try:
                     await send_managed_bot_message(
                         bot,
                         chat_id,
-                        "📣 <b>Автособытие дня</b>\n\n" + render_event(payload),
+                        "📣 <b>Автособытие района</b>\n\n" + render_event(payload),
                         reply_markup=event_keyboard(),
                     )
                 except Exception:

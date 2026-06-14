@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, Duel, DuelStatus, Membership, Player, War, utcnow
+from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, CityStatus, Duel, DuelStatus, Membership, Player, War, utcnow
 
 CITY_PREFIXES = [
     "Неоновый", "Шумный", "Подпольный", "Кибер", "Бешеный", "Сонный", "Золотой", "Пиксельный",
@@ -95,6 +95,27 @@ BUILDINGS: dict[str, dict[str, Any]] = {
 }
 
 SEASON_DAYS = 14
+
+ACTIVITY_MODES: dict[str, dict[str, Any]] = {
+    "quiet": {"name": "🔕 Тихо", "hours": 30, "text": "редкие автособытия, минимум шума"},
+    "normal": {"name": "⚖️ Нормально", "hours": 18, "text": "баланс движа и спокойствия"},
+    "chaos": {"name": "🔥 Хаос", "hours": 8, "text": "частый движ для активных чатов"},
+}
+
+ACHIEVEMENTS: dict[str, dict[str, str]] = {
+    "first_steps": {"name": "🏙 Первый житель", "text": "вступил в город"},
+    "founder": {"name": "👑 Основатель", "text": "забрал титул владельца района"},
+    "worker": {"name": "💼 Работяга", "text": "накопил первый рабочий опыт"},
+    "rich_100": {"name": "💰 Первый капитал", "text": "накопил 100 монет"},
+    "rep_20": {"name": "⭐ Уважаемый мутный тип", "text": "добрался до 20 репутации"},
+    "convict": {"name": "⚖️ Судимый районный", "text": "получил первую судимость"},
+    "faction": {"name": "🧱 Человек фракции", "text": "выбрал сторону в районе"},
+    "items": {"name": "🎒 Барахольщик", "text": "завёл первый предмет"},
+    "escape": {"name": "🕳 Беглец", "text": "выбрался из подвала"},
+    "thief": {"name": "🕶 Руки у казны", "text": "попытался ограбить казну"},
+    "rebel": {"name": "🔥 Организатор бунта", "text": "поднял район на бунт"},
+    "duelist": {"name": "⚔️ Дуэлянт", "text": "участвовал в дуэли"},
+}
 
 
 BLACK_MARKET_ITEMS: dict[str, dict[str, Any]] = {
@@ -472,6 +493,7 @@ def join_city(db: Session, city: City, player: Player, is_chat_owner: bool = Fal
 
     if is_chat_owner:
         grant_founder_title(db, city, player, membership)
+    refresh_player_achievements(db, city, player)
     db.flush()
     return membership, True
 
@@ -502,6 +524,7 @@ def grant_founder_title(db: Session, city: City, player: Player, membership: Mem
         city.treasury += 15
         city.xp += 20
         log(db, city.id, player.id, "founder_claim", f"{display_player(player)} получил титул Основатель района.")
+        grant_achievement(db, city, player, "founder")
     city.owner_telegram_user_id = player.telegram_user_id
     maybe_level_up(city)
     db.flush()
@@ -656,6 +679,7 @@ def collect_daily_reward(db: Session, city: City, player: Player) -> tuple[bool,
         trophy_line = f" Трофей города: {trophy}."
     maybe_level_up(city)
     log(db, city.id, player.id, "daily", f"{display_player(player)} забрал ежедневную награду: +{reward} монет, серия {player.daily_streak}.")
+    refresh_player_achievements(db, city, player)
     db.flush()
     text = f"{display_player(player)} забрал ежедневную награду: +{reward} монет, +{xp_gain} XP. Серия: {player.daily_streak} дней.{trophy_line}"
     return True, text, daily_payload(player)
@@ -793,6 +817,7 @@ def player_profile(db: Session, city: City, player: Player) -> dict[str, Any]:
         "reputation": membership.reputation if membership else 0,
         "status": membership_status(membership),
         "convictions": membership.convictions if membership else 0,
+        "achievements_count": len(get_achievements(membership)),
         "joined": bool(membership),
     }
 
@@ -889,6 +914,7 @@ def work(db: Session, city: City, player: Player, cooldown_hours: int = 4) -> Wo
     if leveled:
         text += f" Город вырос до уровня {city.level}."
     log(db, city.id, player.id, "work", text)
+    refresh_player_achievements(db, city, player)
     return WorkResult(text, coins, xp, treasury)
 
 
@@ -928,11 +954,10 @@ def get_active_event(db: Session, city: City) -> CityEvent | None:
 
 
 def create_new_event_if_due(db: Session, city: City) -> CityEvent | None:
-    """Create a fresh automatic event only if the city has no active event and cooldown passed."""
+    """Create a fresh automatic event only if the city has no active event and its activity mode allows it."""
     if get_active_event(db, city):
         return None
-    last_event = _aware(city.last_event_at)
-    if last_event and utcnow() < last_event + timedelta(hours=18):
+    if not auto_event_due(city):
         return None
     return create_daily_event(db, city, force=True)
 
@@ -1418,6 +1443,7 @@ def admin_stats(db: Session) -> dict[str, Any]:
         select(func.count(func.distinct(ActionLog.player_id))).where(ActionLog.player_id.is_not(None), ActionLog.created_at >= since_day)
     ) or 0
     actions_day = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.created_at >= since_day)) or 0
+    active_cities_day = db.scalar(select(func.count(func.distinct(ActionLog.city_id))).where(ActionLog.city_id.is_not(None), ActionLog.created_at >= since_day)) or 0
     new_cities_day = db.scalar(select(func.count(City.id)).where(City.created_at >= since_day)) or 0
     referrals_total = db.scalar(select(func.count(CityReferral.id))) or 0
     alliances_total = db.scalar(select(func.count(CityAlliance.id)).where(CityAlliance.status == AllianceStatus.ACTIVE.value)) or 0
@@ -1441,6 +1467,7 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "memberships_total": int(memberships_total),
         "active_players_day": int(active_players_day),
         "actions_day": int(actions_day),
+        "active_cities_day": int(active_cities_day),
         "new_cities_day": int(new_cities_day),
         "referrals_total": int(referrals_total),
         "alliances_total": int(alliances_total),
@@ -1557,6 +1584,7 @@ def city_payload(db: Session, city: City) -> dict[str, Any]:
         "alliances_count": city_alliance_count(db, city.id),
         "referrals_count": city_referral_count(db, city.id),
         "history_count": len(_safe_json_list(city.history_json)),
+        "activity_mode": activity_mode_payload(city),
         "factions_count": sum(item["count"] for item in faction_counts(db, city)),
         "season": season_payload(city),
         "shop": get_city_shop(city),
@@ -1885,6 +1913,7 @@ def create_duel_challenge(db: Session, city: City, challenger: Player, target: P
     duel = Duel(city_id=city.id, challenger_player_id=challenger.id, target_player_id=target.id, stake=stake, status=DuelStatus.ACTIVE.value)
     db.add(duel)
     city.xp += 3
+    grant_achievement(db, city, challenger, "duelist")
     log(db, city.id, challenger.id, "duel_created", f"{display_player(challenger)} вызвал {display_player(target)} на дуэль. Ставка: {stake}.")
     db.flush()
     return duel, f"{display_player(challenger)} вызвал {display_player(target)} на дуэль. Ставка: {stake} монет."
@@ -1934,6 +1963,8 @@ def resolve_duel(db: Session, city: City, duel_id: int, accepter: Player) -> tup
     duel.resolved_at = utcnow()
     text = f"{display_player(winner)} победил {display_player(loser)} в дуэли и забрал банк {stake * 2} монет."
     log(db, city.id, winner.id, "duel_finished", text)
+    grant_achievement(db, city, winner, "duelist")
+    grant_achievement(db, city, loser, "duelist")
     db.flush()
     return duel, DuelResult(text, display_player(winner), display_player(loser), stake, int(ch_score), int(ta_score))
 
@@ -1943,6 +1974,7 @@ def founder_panel_payload(db: Session, city: City) -> dict[str, Any]:
         "city": city_payload(db, city),
         "officials": city_officials(db, city),
         "recent_logs": recent_logs(db, city.id, limit=5),
+        "activity_mode": activity_mode_payload(city),
     }
 
 
@@ -2107,6 +2139,7 @@ def buy_item(db: Session, city: City, player: Player, key: str) -> tuple[bool, s
     city.xp += 4
     text = f"{display_player(player)} купил предмет: {ITEMS[key]['name']}."
     log(db, city.id, player.id, "item_buy", text)
+    grant_achievement(db, city, player, "items")
     db.flush()
     return True, text, inventory_payload(db, city, player)
 
@@ -2176,6 +2209,7 @@ def attempt_escape(db: Session, city: City, player: Player) -> tuple[bool, str, 
         membership.civic_title = "🕳 Беглец района"
         text = f"{display_player(player)} сбежал из подвала и получил титул Беглец района."
         add_city_history(city, text, "🕳")
+        grant_achievement(db, city, player, "escape")
         ok = True
     else:
         membership.jailed_until = jailed + timedelta(minutes=45)
@@ -2228,6 +2262,7 @@ def steal_treasury(db: Session, city: City, player: Player) -> tuple[bool, str]:
     city.xp += 8
     maybe_level_up(city)
     log(db, city.id, player.id, "steal", text)
+    grant_achievement(db, city, player, "thief")
     add_city_history(city, text, "💰")
     db.flush()
     return ok, text
@@ -2270,6 +2305,8 @@ def create_revolt_event(db: Session, city: City, player: Player | None = None, f
     city.threat += 2
     city.xp += 6
     log(db, city.id, player.id if player else None, "revolt", f"В городе начался бунт против власти.")
+    if player:
+        grant_achievement(db, city, player, "rebel")
     add_city_history(city, f"Начался бунт против власти. Инициатор: {starter}.", "🔥")
     db.flush()
     return event, "Бунт начался. Район выбирает судьбу власти."
@@ -2287,6 +2324,173 @@ def maybe_legendary_event(db: Session, city: City) -> str | None:
     log(db, city.id, None, "legendary", text)
     db.flush()
     return text
+
+
+def _safe_json_str_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[str] = []
+    for item in data:
+        if isinstance(item, str) and item in ACHIEVEMENTS and item not in result:
+            result.append(item)
+    return result[:80]
+
+
+def get_achievements(membership: Membership | None) -> list[str]:
+    return _safe_json_str_list(membership.achievements_json if membership else "[]")
+
+
+def set_achievements(membership: Membership, keys: list[str]) -> None:
+    clean: list[str] = []
+    for key in keys:
+        if key in ACHIEVEMENTS and key not in clean:
+            clean.append(key)
+    membership.achievements_json = json.dumps(clean[:80], ensure_ascii=False)
+
+
+def grant_achievement(db: Session, city: City, player: Player, key: str) -> bool:
+    if key not in ACHIEVEMENTS:
+        return False
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return False
+    owned = get_achievements(membership)
+    if key in owned:
+        return False
+    owned.insert(0, key)
+    set_achievements(membership, owned)
+    membership.reputation += 2
+    membership.influence += 1
+    city.xp += 5
+    spec = ACHIEVEMENTS[key]
+    text = f"{display_player(player)} получил достижение: {spec['name']}."
+    log(db, city.id, player.id, "achievement", text)
+    add_city_history(city, text, "🏆")
+    return True
+
+
+def refresh_player_achievements(db: Session, city: City, player: Player) -> list[str]:
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    if not membership:
+        return []
+    new_keys: list[str] = []
+    checks = [
+        ("first_steps", True),
+        ("founder", membership.special_title == FOUNDER_TITLE),
+        ("worker", player.xp >= 35),
+        ("rich_100", player.coins >= 100),
+        ("rep_20", membership.reputation >= 20),
+        ("convict", membership.convictions >= 1),
+        ("faction", bool(membership.faction)),
+        ("items", bool(get_inventory(membership))),
+        ("escape", membership.civic_title == "🕳 Беглец района"),
+    ]
+    for key, condition in checks:
+        if condition and grant_achievement(db, city, player, key):
+            new_keys.append(key)
+    db.flush()
+    return new_keys
+
+
+def achievement_payload(db: Session, city: City, player: Player) -> dict[str, Any]:
+    refresh_player_achievements(db, city, player)
+    membership = db.scalar(select(Membership).where(Membership.city_id == city.id, Membership.player_id == player.id))
+    owned = get_achievements(membership)
+    return {
+        "owned_count": len(owned),
+        "total_count": len(ACHIEVEMENTS),
+        "items": [
+            {"key": key, "name": ACHIEVEMENTS[key]["name"], "text": ACHIEVEMENTS[key]["text"]}
+            for key in owned if key in ACHIEVEMENTS
+        ],
+        "locked": [
+            {"key": key, "name": spec["name"], "text": spec["text"]}
+            for key, spec in ACHIEVEMENTS.items() if key not in owned
+        ],
+    }
+
+
+def activity_mode_payload(city: City) -> dict[str, Any]:
+    key = city.activity_mode if city.activity_mode in ACTIVITY_MODES else "normal"
+    spec = ACTIVITY_MODES[key]
+    return {"key": key, "name": spec["name"], "text": spec["text"], "hours": spec["hours"], "items": ACTIVITY_MODES}
+
+
+def set_city_activity_mode(db: Session, city: City, mode: str) -> tuple[bool, str, dict[str, Any]]:
+    mode = (mode or "").strip().lower()
+    if mode not in ACTIVITY_MODES:
+        return False, "Такого режима нет.", activity_mode_payload(city)
+    city.activity_mode = mode
+    log(db, city.id, None, "activity_mode", f"Режим активности изменён: {ACTIVITY_MODES[mode]['name']}.")
+    db.flush()
+    return True, f"Режим активности: {ACTIVITY_MODES[mode]['name']}.", activity_mode_payload(city)
+
+
+def auto_event_due(city: City) -> bool:
+    if city.status != CityStatus.ACTIVE.value:
+        return False
+    mode = city.activity_mode if city.activity_mode in ACTIVITY_MODES else "normal"
+    hours = int(ACTIVITY_MODES[mode]["hours"])
+    last_event = _aware(city.last_event_at)
+    return not last_event or utcnow() >= last_event + timedelta(hours=hours)
+
+
+def daily_summary_payload(db: Session, city: City) -> dict[str, Any]:
+    since = utcnow() - timedelta(days=1)
+    logs = db.scalars(
+        select(ActionLog)
+        .where(ActionLog.city_id == city.id, ActionLog.created_at >= since)
+        .order_by(desc(ActionLog.created_at))
+        .limit(10)
+    ).all()
+    top = top_players(db, city, limit=5)
+    rich_row = db.execute(
+        select(Player, Membership)
+        .join(Membership, Membership.player_id == Player.id)
+        .where(Membership.city_id == city.id)
+        .order_by(desc(Player.coins))
+        .limit(1)
+    ).first()
+    suspect_row = db.execute(
+        select(Player, Membership)
+        .join(Membership, Membership.player_id == Player.id)
+        .where(Membership.city_id == city.id)
+        .order_by(desc(Membership.convictions), desc(Membership.reputation))
+        .limit(1)
+    ).first()
+    action_count = func.count(ActionLog.id)
+    top_action_rows = db.execute(
+        select(ActionLog.action, action_count.label("n"))
+        .where(ActionLog.city_id == city.id, ActionLog.created_at >= since)
+        .group_by(ActionLog.action)
+        .order_by(desc(action_count))
+        .limit(3)
+    ).all()
+    city.last_daily_summary_at = utcnow()
+    return {
+        "city": city_payload(db, city),
+        "top": top,
+        "richest": {"name": display_player(rich_row[0]), "coins": rich_row[0].coins} if rich_row else None,
+        "suspect": {"name": display_player(suspect_row[0]), "convictions": suspect_row[1].convictions} if suspect_row else None,
+        "logs": [{"action": item.action, "text": item.text} for item in logs],
+        "actions": [{"action": row[0], "count": int(row[1])} for row in top_action_rows],
+    }
+
+
+def should_send_daily_summary(city: City) -> bool:
+    mode = city.activity_mode if city.activity_mode in ACTIVITY_MODES else "normal"
+    if mode == "quiet":
+        return False
+    last = _aware(city.last_daily_summary_at)
+    hours = 24 if mode == "normal" else 12
+    return not last or utcnow() >= last + timedelta(hours=hours)
+
 
 def validate_telegram_init_data(init_data: str) -> dict[str, Any] | None:
     """Validate Telegram Mini App initData using BOT_TOKEN, return parsed data if valid."""
