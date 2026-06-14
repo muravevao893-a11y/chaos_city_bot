@@ -83,6 +83,13 @@ from app.game import (
     season_payload,
     shop_payload,
     start_war,
+    top_week_cities,
+    hall_of_fame_payload,
+    referral_progress_payload,
+    submit_feedback,
+    feedback_items,
+    admin_chats_payload,
+    admin_chat_payload,
     top_cities,
     top_players,
     vote_event,
@@ -212,6 +219,13 @@ def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏙 Панель города", callback_data="cc:city")]])
 
 
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="cc:admin_stats")],
+        [InlineKeyboardButton(text="🏙 Чаты", callback_data="cc:admin_chats"), InlineKeyboardButton(text="📝 Отзывы", callback_data="cc:admin_feedback")],
+    ])
+
+
 def city_panel_keyboard(is_member: bool = True, is_founder: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if not is_member:
@@ -227,6 +241,10 @@ def city_panel_keyboard(is_member: bool = True, is_founder: bool = False) -> Inl
         ],
         [
             InlineKeyboardButton(text="🌍 Топ городов", callback_data="cc:global_top"),
+            InlineKeyboardButton(text="🏛 Зал славы", callback_data="cc:hall"),
+        ],
+        [
+            InlineKeyboardButton(text="📆 Топ недели", callback_data="cc:topweek"),
             InlineKeyboardButton(text="⚙️ Ещё", callback_data="cc:more"),
         ],
     ])
@@ -305,7 +323,11 @@ def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="📣 Поделиться", callback_data="cc:share"),
+            InlineKeyboardButton(text="🌱 Рефералка", callback_data="cc:referral_progress"),
+        ],
+        [
             InlineKeyboardButton(text="🎁 Донат", callback_data="cc:donate"),
+            InlineKeyboardButton(text="📝 Отзыв", callback_data="cc:feedback_help"),
         ],
         [
             InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
@@ -620,12 +642,97 @@ def render_admin_stats(payload: dict[str, Any]) -> str:
         f"Дуэлей: активных <b>{payload.get('duels_active', 0)}</b> · завершённых <b>{payload.get('duels_finished', 0)}</b>",
         f"Покупок на чёрном рынке за 24ч: <b>{payload.get('black_market_actions', 0)}</b>",
         f"Stars-покупок за 24ч: <b>{payload.get('stars_purchases_day', 0)}</b> · <b>{payload.get('stars_total_day', 0)}</b> ⭐",
+        f"Отзывов за 24ч: <b>{payload.get('feedback_day', 0)}</b>",
     ]
     if top_action:
         lines.append(f"Самое частое действие за 24ч: <b>{h(top_action.get('action'))}</b> · {top_action.get('count')}")
     if top_city:
         lines.append(f"Топ-город: <b>{h(top_city.get('name'))}</b> · ур. {top_city.get('level')} · жители {top_city.get('population')}")
     return "\n".join(lines)
+
+
+
+def render_top_week(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "📆 <b>Топ недели</b>\n\nГорода пока раскачиваются."
+    lines = ["📆 <b>Города недели</b>", ""]
+    for i, item in enumerate(items, 1):
+        lines.append(
+            f"{i}. <b>{h(item['name'])}</b> — {h(item['rank'])} · действий {item['actions']} · жителей {item['population']}"
+        )
+    return "\n".join(lines)
+
+
+def render_hall(payload: dict[str, Any]) -> str:
+    lines = ["🏛 <b>Зал славы Чатограда</b>", ""]
+    if payload.get("first"):
+        lines.append("🏙 Первые города:")
+        for item in payload["first"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> — {h(item['rank'])}")
+    if payload.get("referrers"):
+        lines.append("\n🌱 Сарафанка:")
+        for item in payload["referrers"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> — привёл {item['refs']}")
+    if payload.get("richest"):
+        lines.append("\n💰 Богатые районы:")
+        for item in payload["richest"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> — казна {item['treasury']}")
+    if payload.get("warlike"):
+        lines.append("\n⚔️ Воинственные:")
+        for item in payload["warlike"][:5]:
+            lines.append(f"• <b>{h(item['name'])}</b> — рейдов {item['wars']}")
+    return "\n".join(lines)
+
+
+def render_referral_progress(payload: dict[str, Any]) -> str:
+    lines = ["🌱 <b>Сарафанка города</b>", "", f"Приведено чатов: <b>{payload.get('total', 0)}</b>", ""]
+    for item in payload.get("milestones", []):
+        mark = "✅" if item.get("done") else "▫️"
+        lines.append(f"{mark} {item['threshold']} — {h(item['trophy'])}")
+    return "\n".join(lines)
+
+
+def render_admin_chats(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🏙 <b>Чаты</b>\n\nПусто."
+    lines = ["🏙 <b>Активные чаты</b>", ""]
+    for item in items:
+        lines.append(
+            f"• <b>{h(item['name'])}</b> · id {item['id']} · код <code>{h(item['invite_code'])}</code> · 24ч {item['actions_day']}"
+        )
+    return "\n".join(lines)
+
+
+def render_admin_chat(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "🏙 Чат не найден."
+    city = payload["city"]
+    lines = [
+        f"🏙 <b>{h(city['name'])}</b>",
+        "",
+        f"ID: <b>{city['id']}</b> · код <code>{h(city['invite_code'])}</code>",
+        f"Жители: <b>{city['population']}</b> · казна <b>{city['treasury']}</b> · ур. <b>{city['level']}</b>",
+        f"Рефералка: <b>{city.get('referrals_count', 0)}</b> · союзы <b>{city.get('alliances_count', 0)}</b>",
+    ]
+    if payload.get("logs"):
+        lines.append("\n📜 Последнее:")
+        for item in payload["logs"][:5]:
+            lines.append(f"• {h(item['text'])}")
+    if payload.get("feedback"):
+        lines.append("\n📝 Отзывы:")
+        for item in payload["feedback"][:3]:
+            lines.append(f"• {h(item['text'])}")
+    return "\n".join(lines)
+
+
+def render_feedback_items(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "📝 <b>Отзывы</b>\n\nПусто."
+    lines = ["📝 <b>Последние отзывы</b>", ""]
+    for item in items:
+        lines.append(f"• <b>{h(item['city'])}</b> · {h(item['player'])}: {h(item['text'])}")
+    return "\n".join(lines)
+
 
 
 def render_daily(payload: dict[str, Any], text: str | None = None) -> str:
@@ -2317,6 +2424,73 @@ async def send_global_top(message: Message) -> None:
         )
     await send_game_message(message, "\n".join(lines), reply_markup=back_keyboard() if is_group(message) else None)
 
+async def send_top_week(message: Message) -> None:
+    with session_scope() as db:
+        items = top_week_cities(db, limit=10)
+    await send_game_message(message, render_top_week(items), reply_markup=back_keyboard() if is_group(message) else None)
+
+
+async def send_hall(message: Message) -> None:
+    with session_scope() as db:
+        payload = hall_of_fame_payload(db)
+    await send_game_message(message, render_hall(payload), reply_markup=back_keyboard() if is_group(message) else None)
+
+
+async def perform_referral_progress(message: Message) -> None:
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = referral_progress_payload(db, city)
+    await send_game_message(message, render_referral_progress(payload), reply_markup=back_keyboard())
+
+
+async def perform_feedback(message: Message, user: Any | None, text: str) -> None:
+    with session_scope() as db:
+        city = None
+        player = None
+        if is_group(message):
+            city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        if user:
+            player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+        result = submit_feedback(db, city, player, text)
+    await send_game_message(message, result, reply_markup=back_keyboard() if is_group(message) else None)
+
+
+async def perform_admin_panel(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        payload = admin_stats(db)
+    await send_game_message(message, render_admin_stats(payload), reply_markup=admin_keyboard())
+
+
+async def perform_admin_chats(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        items = admin_chats_payload(db, limit=15)
+    await send_game_message(message, render_admin_chats(items), reply_markup=admin_keyboard())
+
+
+async def perform_admin_feedback(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        items = feedback_items(db, limit=12)
+    await send_game_message(message, render_feedback_items(items), reply_markup=admin_keyboard())
+
+
+async def perform_admin_chat(message: Message, code_or_id: str) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        payload = admin_chat_payload(db, code_or_id)
+    await send_game_message(message, render_admin_chat(payload), reply_markup=admin_keyboard())
+
+
 
 async def perform_logs(message: Message) -> None:
     with session_scope() as db:
@@ -3171,6 +3345,69 @@ async def cb_ai_status(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await perform_ai_status(callback.message)
+
+
+@router.callback_query(F.data == "cc:topweek")
+async def cb_topweek(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await send_top_week(callback.message)
+
+
+@router.callback_query(F.data == "cc:hall")
+async def cb_hall(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await send_hall(callback.message)
+
+
+@router.callback_query(F.data == "cc:referral_progress")
+async def cb_referral_progress(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_referral_progress(callback.message)
+
+
+@router.callback_query(F.data == "cc:feedback_help")
+async def cb_feedback_help(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await send_game_message(callback.message, "📝 <b>Отзыв</b>\n\nОставь короткую записку: <code>/feedback текст</code>", reply_markup=back_keyboard())
+
+
+@router.callback_query(F.data == "cc:admin_stats")
+async def cb_admin_stats(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_panel(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_chats")
+async def cb_admin_chats(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_chats(callback.message)
+
+
+@router.callback_query(F.data == "cc:admin_feedback")
+async def cb_admin_feedback(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_feedback(callback.message)
 
 
 @router.callback_query(F.data == "cc:global_top")

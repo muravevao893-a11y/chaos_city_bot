@@ -244,6 +244,13 @@ CITY_STYLE_POOL = [
     "🧊 Холодная республика",
 ]
 
+REFERRAL_MILESTONES: dict[int, dict[str, Any]] = {
+    1: {"trophy": "🌱 Первый приведённый район", "treasury": 80, "xp": 50},
+    3: {"trophy": "🚦 Узел сарафанки", "treasury": 180, "xp": 120, "style": "🌆 Сарафанный район"},
+    5: {"trophy": "📣 Голос района", "treasury": 300, "xp": 220, "style": "🏛 Район-магнит"},
+    10: {"trophy": "👑 Лорд сарафанки", "treasury": 700, "xp": 500, "style": "👑 Империя приглашений"},
+}
+
 LEGENDARY_EVENTS = [
     "👑 В районе нашли древнюю корону. Никто не понял, чья она, но спорят все.",
     "🛸 НЛО пролетело над мэрией и забрало отчётность. Казна облегчённо выдохнула.",
@@ -888,6 +895,52 @@ def city_premium_payload(city: City) -> dict[str, Any]:
     }
 
 
+
+def award_referral_milestones(db: Session, city: City) -> list[str]:
+    total = city_referral_count(db, city.id)
+    premium = get_city_premium(city)
+    awarded = premium.get("referral_milestones") or []
+    if not isinstance(awarded, list):
+        awarded = []
+    awarded_set = {int(item) for item in awarded if str(item).isdigit()}
+    messages: list[str] = []
+    for threshold, spec in sorted(REFERRAL_MILESTONES.items()):
+        if total >= threshold and threshold not in awarded_set:
+            trophy = award_trophy(city, str(spec["trophy"]))
+            city.treasury += int(spec.get("treasury", 0))
+            city.xp += int(spec.get("xp", 0))
+            if spec.get("style"):
+                premium["style"] = spec["style"]
+            awarded.append(threshold)
+            messages.append(f"{threshold} районов: {trophy}")
+            log(db, city.id, None, "referral_milestone", f"Реферальный уровень {threshold}: {trophy}.")
+    premium["referral_milestones"] = sorted({int(item) for item in awarded if str(item).isdigit()})
+    set_city_premium(city, premium)
+    maybe_level_up(city)
+    db.flush()
+    return messages
+
+
+def referral_progress_payload(db: Session, city: City) -> dict[str, Any]:
+    total = city_referral_count(db, city.id)
+    premium = get_city_premium(city)
+    awarded = premium.get("referral_milestones") or []
+    if not isinstance(awarded, list):
+        awarded = []
+    return {
+        "total": total,
+        "awarded": [int(item) for item in awarded if str(item).isdigit()],
+        "milestones": [
+            {
+                "threshold": threshold,
+                "trophy": spec["trophy"],
+                "done": total >= threshold,
+            }
+            for threshold, spec in sorted(REFERRAL_MILESTONES.items())
+        ],
+    }
+
+
 def shop_payload(city: City) -> dict[str, Any]:
     owned = get_city_shop(city)
     items = []
@@ -1144,13 +1197,23 @@ def get_active_event(db: Session, city: City) -> CityEvent | None:
     )
 
 
+def create_smart_city_event(db: Session, city: City) -> CityEvent | None:
+    population = city_population(db, city.id)
+    if population >= 3 and city.treasury >= 160 and random.random() < 0.35:
+        return create_rumor_event(db, city, force=True)
+    if population >= 4 and random.random() < 0.25:
+        return create_drama_event(db, city, force=True)
+    if city.threat >= 12 and random.random() < 0.20:
+        return create_revolt_event(db, city)
+    return create_daily_event(db, city, force=True)
+
+
 def create_new_event_if_due(db: Session, city: City) -> CityEvent | None:
-    """Create a fresh automatic event only if the city has no active event and its activity mode allows it."""
     if get_active_event(db, city):
         return None
     if not auto_event_due(city):
         return None
-    return create_daily_event(db, city, force=True)
+    return create_smart_city_event(db, city)
 
 
 def vote_event(db: Session, city: City, player: Player, option: int) -> tuple[CityEvent | None, str]:
@@ -1577,12 +1640,14 @@ def register_city_referral(db: Session, invited_city: City, referrer_code: str |
     invited_city.treasury += 35
     invited_city.xp += 25
     trophy = award_trophy(referrer, "🌱 Основатель нового района")
+    milestone_lines = award_referral_milestones(db, referrer)
     maybe_level_up(referrer)
     maybe_level_up(invited_city)
     log(db, referrer.id, None, "city_referral", f"По ссылке города добавили новый чат: {invited_city.name}. Награда: +120 в казну, трофей {trophy}.")
     log(db, invited_city.id, None, "city_referral_joined", f"Город пришёл по ссылке {referrer.name}. Бонус старта: +35 в казну.")
     db.flush()
-    return True, f"Город пришёл по ссылке <b>{referrer.name}</b>. Бонус старта: +35 в казну. {referrer.name} получил трофей и +120 монет."
+    extra = f" Новые уровни: {'; '.join(milestone_lines)}." if milestone_lines else ""
+    return True, f"Город пришёл по ссылке <b>{referrer.name}</b>. Бонус старта: +35 в казну. {referrer.name} получил трофей и +120 монет.{extra}"
 
 
 def create_city_alliance(db: Session, city: City, target_code: str) -> tuple[bool, str, City | None]:
@@ -1677,6 +1742,7 @@ def admin_stats(db: Session) -> dict[str, Any]:
     duels_active = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.ACTIVE.value)) or 0
     duels_finished = db.scalar(select(func.count(Duel.id)).where(Duel.status == DuelStatus.FINISHED.value)) or 0
     black_market_actions = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "black_market", ActionLog.created_at >= since_day)) or 0
+    feedback_day = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "feedback", ActionLog.created_at >= since_day)) or 0
     stars_purchases_day = db.scalar(select(func.count(Purchase.id)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
     stars_total_day = db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
     action_count = func.count(ActionLog.id)
@@ -1703,11 +1769,142 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "duels_active": int(duels_active),
         "duels_finished": int(duels_finished),
         "black_market_actions": int(black_market_actions),
+        "feedback_day": int(feedback_day),
         "stars_purchases_day": int(stars_purchases_day),
         "stars_total_day": int(stars_total_day or 0),
         "top_action": {"action": top_action_row[0], "count": int(top_action_row[1])} if top_action_row else None,
         "top_city": top_city[0] if top_city else None,
     }
+
+
+def top_week_cities(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+    since = utcnow() - timedelta(days=7)
+    action_count = func.count(ActionLog.id)
+    rows = db.execute(
+        select(City, action_count.label("actions"))
+        .join(ActionLog, ActionLog.city_id == City.id)
+        .where(ActionLog.created_at >= since)
+        .group_by(City.id)
+        .order_by(desc(action_count), desc(City.level), desc(City.treasury))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": city.id,
+            "name": city.name,
+            "level": city.level,
+            "rank": city_rank(city),
+            "treasury": city.treasury,
+            "actions": int(actions or 0),
+            "population": city_population(db, city.id),
+            "trophies_count": len(get_city_trophies(city)),
+        }
+        for city, actions in rows
+    ]
+
+
+def hall_of_fame_payload(db: Session) -> dict[str, Any]:
+    first_cities = db.scalars(select(City).order_by(City.created_at).limit(10)).all()
+    richest = db.scalars(select(City).order_by(desc(City.treasury), desc(City.level)).limit(10)).all()
+    warlike_rows = db.execute(
+        select(City, func.count(War.id).label("wars"))
+        .join(War, (War.attacker_city_id == City.id) | (War.defender_city_id == City.id))
+        .group_by(City.id)
+        .order_by(desc(func.count(War.id)))
+        .limit(10)
+    ).all()
+    ref_rows = db.execute(
+        select(City, func.count(CityReferral.id).label("refs"))
+        .join(CityReferral, CityReferral.referrer_city_id == City.id)
+        .group_by(City.id)
+        .order_by(desc(func.count(CityReferral.id)))
+        .limit(10)
+    ).all()
+    return {
+        "first": [{"name": c.name, "level": c.level, "rank": city_rank(c)} for c in first_cities],
+        "richest": [{"name": c.name, "treasury": c.treasury, "level": c.level} for c in richest],
+        "warlike": [{"name": c.name, "wars": int(n or 0), "level": c.level} for c, n in warlike_rows],
+        "referrers": [{"name": c.name, "refs": int(n or 0), "level": c.level} for c, n in ref_rows],
+    }
+
+
+def submit_feedback(db: Session, city: City | None, player: Player | None, text: str) -> str:
+    clean = " ".join((text or "").split())[:600]
+    if not clean:
+        return "📝 Пустой лист районная канцелярия не приняла."
+    log(db, city.id if city else None, player.id if player else None, "feedback", clean)
+    db.flush()
+    return "📝 Записано. Районная канцелярия забрала бумагу."
+
+
+def feedback_items(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(ActionLog)
+        .where(ActionLog.action == "feedback")
+        .order_by(desc(ActionLog.created_at))
+        .limit(limit)
+    ).all()
+    result = []
+    for item in rows:
+        city = db.get(City, item.city_id) if item.city_id else None
+        player = db.get(Player, item.player_id) if item.player_id else None
+        result.append({
+            "city": city.name if city else "личка",
+            "player": display_player(player) if player else "неизвестно",
+            "text": item.text,
+            "created_at": item.created_at.isoformat(),
+        })
+    return result
+
+
+def admin_chats_payload(db: Session, limit: int = 15) -> list[dict[str, Any]]:
+    since = utcnow() - timedelta(days=1)
+    activity_subq = (
+        select(ActionLog.city_id, func.count(ActionLog.id).label("actions"))
+        .where(ActionLog.created_at >= since, ActionLog.city_id.is_not(None))
+        .group_by(ActionLog.city_id)
+        .subquery()
+    )
+    rows = db.execute(
+        select(City, func.coalesce(activity_subq.c.actions, 0))
+        .outerjoin(activity_subq, activity_subq.c.city_id == City.id)
+        .order_by(desc(func.coalesce(activity_subq.c.actions, 0)), desc(City.created_at))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": city.id,
+            "chat_id": city.chat_id,
+            "name": city.name,
+            "title": city.title,
+            "level": city.level,
+            "treasury": city.treasury,
+            "actions_day": int(actions or 0),
+            "population": city_population(db, city.id),
+            "invite_code": city.invite_code,
+        }
+        for city, actions in rows
+    ]
+
+
+def admin_chat_payload(db: Session, code_or_id: str) -> dict[str, Any] | None:
+    raw = (code_or_id or "").strip().upper().removeprefix("CITY_")
+    city = None
+    if raw.isdigit():
+        city = db.get(City, int(raw))
+    if not city and raw:
+        city = db.scalar(select(City).where(City.invite_code == raw))
+    if not city:
+        return None
+    return {
+        "city": city_payload(db, city),
+        "logs": recent_logs(db, city.id, limit=8),
+        "feedback": [
+            item for item in feedback_items(db, limit=20)
+            if item["city"] == city.name
+        ][:5],
+    }
+
 
 def top_cities(db: Session, limit: int = 10) -> list[dict[str, Any]]:
     population_subquery = (
