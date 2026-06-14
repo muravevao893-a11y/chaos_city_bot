@@ -125,6 +125,8 @@ def _run_light_migrations() -> None:
     _create_index_if_missing("ix_players_telegram", "CREATE INDEX ix_players_telegram ON players (telegram_user_id)")
     _create_index_if_missing("ix_purchases_city_created", "CREATE INDEX ix_purchases_city_created ON purchases (city_id, created_at)")
     _create_index_if_missing("ix_purchases_player_created", "CREATE INDEX ix_purchases_player_created ON purchases (player_id, created_at)")
+    _create_index_if_missing("ix_error_logs_created", "CREATE INDEX ix_error_logs_created ON error_logs (created_at)")
+    _create_index_if_missing("ix_error_logs_chat_created", "CREATE INDEX ix_error_logs_chat_created ON error_logs (chat_id, created_at)")
     _create_index_if_missing("ix_action_logs_action_created", "CREATE INDEX ix_action_logs_action_created ON action_logs (action, created_at)")
     _create_index_if_missing("ix_memberships_city_reputation", "CREATE INDEX ix_memberships_city_reputation ON memberships (city_id, reputation)")
     _create_index_if_missing("ix_membership_faction", "CREATE INDEX ix_membership_faction ON memberships (city_id, faction)")

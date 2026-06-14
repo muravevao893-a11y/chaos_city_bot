@@ -85,6 +85,15 @@ from app.game import (
     promo_pack_payload,
     weekly_digest_payload,
     use_city_store_item,
+    admin_errors_payload,
+    admin_error_payload,
+    admin_clear_errors,
+    button_rate_limited,
+    city_stage_payload,
+    daily_action_limit_reached,
+    error_count,
+    log_error,
+    production_audit_payload,
     EARLY_1000_CITY_TROPHY,
 )
 
@@ -520,6 +529,42 @@ class GameLogicTest(unittest.TestCase):
         self.assertIsInstance(dead_chats_payload(db), list)
         self.assertIn("text", promo_pack_payload(db, city))
         self.assertIn("actions", weekly_digest_payload(db, city))
+
+
+    def test_v18_production_hardening(self):
+        db = make_session()
+        city, _ = get_or_create_city(db, -9001, "Prod Chat")
+        player, _, _ = get_or_create_player(db, 9001, "prod", "Prod")
+        join_city(db, city, player, is_chat_owner=True)
+
+        stage = city_stage_payload(db, city)
+        self.assertEqual(stage["key"], "new")
+
+        limited, left = button_rate_limited(db, city.chat_id, player.telegram_user_id, "cb:test", seconds=5)
+        self.assertFalse(limited)
+        limited, left = button_rate_limited(db, city.chat_id, player.telegram_user_id, "cb:test", seconds=5)
+        self.assertTrue(limited)
+        self.assertGreaterEqual(left, 1)
+
+        err = log_error(db, "test", RuntimeError("boom"), traceback_text="trace", chat_id=city.chat_id, user_id=player.telegram_user_id)
+        self.assertGreater(err.id, 0)
+        self.assertEqual(error_count(db, 24), 1)
+        errors = admin_errors_payload(db, limit=5)
+        self.assertEqual(errors[0]["type"], "RuntimeError")
+        detail = admin_error_payload(db, err.id)
+        self.assertIn("boom", detail["message"])
+
+        audit = production_audit_payload(db, city)
+        self.assertEqual(audit["stage"]["key"], "new")
+        self.assertIn("auto_event_hours", audit)
+
+        reached, count, limit = daily_action_limit_reached(db, city, "court")
+        self.assertFalse(reached)
+        self.assertGreaterEqual(limit, 1)
+
+        cleared = admin_clear_errors(db, days=1)
+        self.assertEqual(cleared, 0)
+
 
 
 if __name__ == "__main__":

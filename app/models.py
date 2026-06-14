@@ -178,6 +178,26 @@ class CityAlliance(Base):
 
 
 
+
+class ErrorLog(Base):
+    __tablename__ = "error_logs"
+    __table_args__ = (
+        Index("ix_error_logs_created", "created_at"),
+        Index("ix_error_logs_chat_created", "chat_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(80), default="bot", nullable=False)
+    error_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    traceback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    update_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolved: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class Purchase(Base):
     __tablename__ = "purchases"
     __table_args__ = (

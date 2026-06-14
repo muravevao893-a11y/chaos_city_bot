@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import traceback
 from typing import Any
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ChatType, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery, User
+from aiogram.types import BufferedInputFile, CallbackQuery, ErrorEvent, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery, User
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -64,6 +65,7 @@ from app.game import (
     create_raid_challenge,
     create_rumor_event,
     daily_payload,
+    daily_action_limit_reached,
     daily_summary_payload,
     display_player,
     event_payload,
@@ -116,6 +118,13 @@ from app.game import (
     promo_pack_payload,
     owner_center_payload,
     weekly_digest_payload,
+    admin_clear_errors,
+    admin_error_payload,
+    admin_errors_payload,
+    button_rate_limited,
+    city_stage_payload,
+    log_error,
+    production_audit_payload,
     owner_stats_payload,
     stars_products_payload,
     MECHANIC_TOGGLES,
@@ -138,6 +147,33 @@ logger = logging.getLogger(__name__)
 router = Router(name="chatograd-router")
 
 BRAND = "Чатоград"
+
+
+class CallbackThrottleMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, CallbackQuery) and event.from_user and isinstance(event.message, Message):
+            action = (event.data or "callback")[:80]
+            try:
+                with session_scope() as db:
+                    limited, left = button_rate_limited(db, event.message.chat.id, event.from_user.id, f"cb:{action}", seconds=2)
+                if limited:
+                    await event.answer(f"⏳ {left} сек.", show_alert=False)
+                    return None
+            except Exception:
+                logger.debug("Callback throttle failed", exc_info=True)
+        return await handler(event, data)
+
+
+def _short_trace(exc: BaseException) -> str:
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-12000:]
+
+
+def store_runtime_error(source: str, exc: BaseException, chat_id: int | None = None, user_id: int | None = None, update_json: str | None = None) -> None:
+    try:
+        with session_scope() as db:
+            log_error(db, source, exc, traceback_text=_short_trace(exc), chat_id=chat_id, user_id=user_id, update_json=update_json)
+    except Exception:
+        logger.exception("Could not store runtime error")
 
 
 def h(value: Any) -> str:
@@ -243,36 +279,65 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📈 Рост", callback_data="cc:admin_growth"), InlineKeyboardButton(text="🧲 Удержание", callback_data="cc:admin_retention")],
         [InlineKeyboardButton(text="⭐ Платежи", callback_data="cc:admin_payments"), InlineKeyboardButton(text="💤 Тихие", callback_data="cc:admin_dead_chats")],
         [InlineKeyboardButton(text="🏙 Чаты", callback_data="cc:admin_chats"), InlineKeyboardButton(text="📝 Отзывы", callback_data="cc:admin_feedback")],
+        [InlineKeyboardButton(text="🧯 Ошибки", callback_data="cc:admin_errors")],
     ])
 
 
-def city_panel_keyboard(is_member: bool = True, is_founder: bool = False) -> InlineKeyboardMarkup:
+def _payload_population(payload: dict[str, Any] | None) -> int:
+    try:
+        return int((payload or {}).get("population", 999))
+    except Exception:
+        return 999
+
+
+def _payload_disabled(payload: dict[str, Any] | None) -> set[str]:
+    premium = (payload or {}).get("premium") or {}
+    settings = premium.get("settings") or {}
+    disabled = settings.get("disabled") or []
+    if not isinstance(disabled, list):
+        return set()
+    return {str(item) for item in disabled}
+
+
+def _stage_key(payload: dict[str, Any] | None) -> str:
+    population = _payload_population(payload)
+    if population <= 4:
+        return "new"
+    if population <= 14:
+        return "growing"
+    return "full"
+
+
+def city_panel_keyboard(is_member: bool = True, is_founder: bool = False, payload: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    stage = _stage_key(payload)
     rows: list[list[InlineKeyboardButton]] = []
     if not is_member:
         rows.append([InlineKeyboardButton(text="✅ Вступить", callback_data="cc:join")])
-    rows.extend([
-        [
-            InlineKeyboardButton(text="🏙 Город", callback_data="cc:city"),
-            InlineKeyboardButton(text="👤 Я", callback_data="cc:profile"),
-        ],
-        [
-            InlineKeyboardButton(text="🎲 Движ", callback_data="cc:move"),
-            InlineKeyboardButton(text="⚔️ Война", callback_data="cc:war"),
-        ],
-        [
-            InlineKeyboardButton(text="🌍 Топ городов", callback_data="cc:global_top"),
-            InlineKeyboardButton(text="🏛 Зал славы", callback_data="cc:hall"),
-        ],
-        [
-            InlineKeyboardButton(text="📆 Топ недели", callback_data="cc:topweek"),
-            InlineKeyboardButton(text="⚙️ Ещё", callback_data="cc:more"),
-        ],
+    rows.append([
+        InlineKeyboardButton(text="🏙 Город", callback_data="cc:city"),
+        InlineKeyboardButton(text="👤 Я", callback_data="cc:profile"),
     ])
+    rows.append([
+        InlineKeyboardButton(text="🎲 Движ", callback_data="cc:move"),
+        InlineKeyboardButton(text="⚙️ Ещё", callback_data="cc:more"),
+    ])
+    if stage != "new":
+        rows.append([
+            InlineKeyboardButton(text="📆 Топ недели", callback_data="cc:topweek"),
+            InlineKeyboardButton(text="🏛 Зал славы", callback_data="cc:hall"),
+        ])
+    if stage == "full":
+        rows.append([
+            InlineKeyboardButton(text="⚔️ Война", callback_data="cc:war"),
+            InlineKeyboardButton(text="🌍 Топ городов", callback_data="cc:global_top"),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def move_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def move_keyboard(payload: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    stage = _stage_key(payload)
+    disabled = _payload_disabled(payload)
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="💼 Работать", callback_data="cc:work"),
             InlineKeyboardButton(text="🎁 Награда", callback_data="cc:daily"),
@@ -281,102 +346,125 @@ def move_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎯 Квест", callback_data="cc:quest"),
             InlineKeyboardButton(text="🎲 Событие", callback_data="cc:event"),
         ],
-        [
-            InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama"),
-            InlineKeyboardButton(text="🗣 Слух", callback_data="cc:rumor"),
-        ],
-        [
-            InlineKeyboardButton(text="⚔️ Дуэль", callback_data="cc:duel_help"),
-            InlineKeyboardButton(text="💰 Ограбить", callback_data="cc:steal"),
-        ],
-        [
-            InlineKeyboardButton(text="🔥 Бунт", callback_data="cc:revolt"),
-            InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"),
-        ],
-        [InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")],
+    ]
+    if stage in {"growing", "full"}:
+        row = [InlineKeyboardButton(text="🔥 Драма", callback_data="cc:drama")]
+        if "rumor" not in disabled:
+            row.append(InlineKeyboardButton(text="🗣 Слух", callback_data="cc:rumor"))
+        rows.append(row)
+    if stage == "full":
+        row = []
+        if "duel" not in disabled:
+            row.append(InlineKeyboardButton(text="⚔️ Дуэль", callback_data="cc:duel_help"))
+        if "steal" not in disabled:
+            row.append(InlineKeyboardButton(text="💰 Ограбить", callback_data="cc:steal"))
+        if row:
+            rows.append(row)
+        row = []
+        if "revolt" not in disabled:
+            row.append(InlineKeyboardButton(text="🔥 Бунт", callback_data="cc:revolt"))
+        row.append(InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper"))
+        rows.append(row)
+    else:
+        rows.append([InlineKeyboardButton(text="🗞 Газета", callback_data="cc:newspaper")])
+    rows.append([InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def war_keyboard(payload: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    stage = _stage_key(payload)
+    rows: list[list[InlineKeyboardButton]] = []
+    if stage == "full":
+        rows.extend([
+            [
+                InlineKeyboardButton(text="⚔️ Рейд", callback_data="cc:raid_help"),
+                InlineKeyboardButton(text="⚔️ Входящие", callback_data="cc:raids"),
+            ],
+            [
+                InlineKeyboardButton(text="⚔️ Атака", callback_data="cc:raid_support:attack"),
+                InlineKeyboardButton(text="🛡 Защита", callback_data="cc:raid_support:defend"),
+            ],
+            [
+                InlineKeyboardButton(text="🕶 Саботаж", callback_data="cc:raid_support:sabotage"),
+                InlineKeyboardButton(text="🤝 Союзы", callback_data="cc:alliances"),
+            ],
+        ])
+    else:
+        rows.append([InlineKeyboardButton(text="🤝 Союзы", callback_data="cc:alliances")])
+    rows.append([
+        InlineKeyboardButton(text="📣 Позвать", callback_data="cc:promo"),
+        InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city"),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def war_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⚔️ Рейд", callback_data="cc:raid_help"),
-            InlineKeyboardButton(text="⚔️ Входящие", callback_data="cc:raids"),
-        ],
-        [
-            InlineKeyboardButton(text="⚔️ Атака", callback_data="cc:raid_support:attack"),
-            InlineKeyboardButton(text="🛡 Защита", callback_data="cc:raid_support:defend"),
-        ],
-        [
-            InlineKeyboardButton(text="🕶 Саботаж", callback_data="cc:raid_support:sabotage"),
-            InlineKeyboardButton(text="🤝 Союзы", callback_data="cc:alliances"),
-        ],
-        [
-            InlineKeyboardButton(text="📣 Позвать", callback_data="cc:promo"),
-            InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city"),
-        ],
-    ])
-
-
-def more_keyboard(is_founder: bool = False) -> InlineKeyboardMarkup:
-    rows = [
+def more_keyboard(is_founder: bool = False, payload: dict[str, Any] | None = None) -> InlineKeyboardMarkup:
+    stage = _stage_key(payload)
+    disabled = _payload_disabled(payload)
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(text="🏗 Постройки", callback_data="cc:buildings"),
             InlineKeyboardButton(text="🛒 Магазин", callback_data="cc:shop"),
-        ],
-        [
-            InlineKeyboardButton(text="🕶 Чёрный рынок", callback_data="cc:black_market"),
-            InlineKeyboardButton(text="🎒 Предметы", callback_data="cc:items"),
-        ],
-        [
-            InlineKeyboardButton(text="🧱 Фракции", callback_data="cc:factions"),
-            InlineKeyboardButton(text="🏆 Достижения", callback_data="cc:achievements"),
         ],
         [
             InlineKeyboardButton(text="📊 Итоги дня", callback_data="cc:day_summary"),
             InlineKeyboardButton(text="🖼 Карточка", callback_data="cc:day_card"),
         ],
         [
-            InlineKeyboardButton(text="📜 Летопись", callback_data="cc:history"),
-            InlineKeyboardButton(text="⚙️ Настройки", callback_data="cc:city_settings"),
-        ],
-        [
-            InlineKeyboardButton(text="👑 Кабинет", callback_data="cc:founder_panel"),
-            InlineKeyboardButton(text="🎯 Миссия", callback_data="cc:mission"),
-        ],
-        [
-            InlineKeyboardButton(text="🕵️ Тайная роль", callback_data="cc:secret_role"),
-            InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape"),
-        ],
-        [
-            InlineKeyboardButton(text="🏷 Титулы", callback_data="cc:title_market"),
-            InlineKeyboardButton(text="⭐ Stars", callback_data="cc:stars"),
+            InlineKeyboardButton(text="👑 Кабинет", callback_data="cc:owner_center"),
+            InlineKeyboardButton(text="⭐ Store", callback_data="cc:city_store"),
         ],
         [
             InlineKeyboardButton(text="📣 Поделиться", callback_data="cc:share"),
             InlineKeyboardButton(text="🌱 Рефералка", callback_data="cc:referral_progress"),
         ],
-        [
-            InlineKeyboardButton(text="🎁 Донат", callback_data="cc:donate"),
-            InlineKeyboardButton(text="📝 Отзыв", callback_data="cc:feedback_help"),
-        ],
-        [
-            InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"),
-            InlineKeyboardButton(text="🗳 Выборы", callback_data="cc:election"),
-        ],
-        [
-            InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
-            InlineKeyboardButton(text="📆 Сезон", callback_data="cc:season"),
-        ],
-        [
-            InlineKeyboardButton(text="📆 Итоги", callback_data="cc:weekly"),
-            InlineKeyboardButton(text="📜 Логи", callback_data="cc:logs"),
-        ],
     ]
+    if stage in {"growing", "full"}:
+        rows.extend([
+            [
+                InlineKeyboardButton(text="🧱 Фракции", callback_data="cc:factions"),
+                InlineKeyboardButton(text="🏆 Достижения", callback_data="cc:achievements"),
+            ],
+            [
+                InlineKeyboardButton(text="📜 Летопись", callback_data="cc:history"),
+                InlineKeyboardButton(text="⚙️ Настройки", callback_data="cc:city_settings"),
+            ],
+        ])
+        row = []
+        if "court" not in disabled:
+            row.append(InlineKeyboardButton(text="⚖️ Суд", callback_data="cc:court"))
+        row.append(InlineKeyboardButton(text="🗳 Выборы", callback_data="cc:election"))
+        rows.append(row)
+    if stage == "full":
+        rows.extend([
+            [
+                InlineKeyboardButton(text="🕶 Чёрный рынок", callback_data="cc:black_market"),
+                InlineKeyboardButton(text="🎒 Предметы", callback_data="cc:items"),
+            ],
+            [
+                InlineKeyboardButton(text="🎯 Миссия", callback_data="cc:mission"),
+                InlineKeyboardButton(text="🕵️ Тайная роль", callback_data="cc:secret_role"),
+            ],
+            [
+                InlineKeyboardButton(text="🧩 Должности", callback_data="cc:officials"),
+                InlineKeyboardButton(text="📆 Сезон", callback_data="cc:season"),
+            ],
+            [
+                InlineKeyboardButton(text="🏷 Титулы", callback_data="cc:title_market"),
+                InlineKeyboardButton(text="⭐ Stars", callback_data="cc:stars"),
+            ],
+        ])
+        if "court" not in disabled:
+            rows.append([InlineKeyboardButton(text="🕳 Побег", callback_data="cc:escape")])
+    rows.append([
+        InlineKeyboardButton(text="🎁 Донат", callback_data="cc:donate"),
+        InlineKeyboardButton(text="📝 Отзыв", callback_data="cc:feedback_help"),
+    ])
     if not is_founder:
         rows.append([InlineKeyboardButton(text="👑 Основатель", callback_data="cc:founder")])
     rows.append([InlineKeyboardButton(text="🏙 Назад", callback_data="cc:city")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def panel_keyboard_for_user(is_member: bool = True, is_founder: bool = False) -> InlineKeyboardMarkup:
@@ -674,11 +762,74 @@ def render_admin_stats(payload: dict[str, Any]) -> str:
         f"Покупок на чёрном рынке за 24ч: <b>{payload.get('black_market_actions', 0)}</b>",
         f"Stars-покупок за 24ч: <b>{payload.get('stars_purchases_day', 0)}</b> · <b>{payload.get('stars_total_day', 0)}</b> ⭐",
         f"Отзывов за 24ч: <b>{payload.get('feedback_day', 0)}</b>",
+        f"Ошибок за 24ч: <b>{payload.get('errors_day', 0)}</b>",
     ]
     if top_action:
         lines.append(f"Самое частое действие за 24ч: <b>{h(top_action.get('action'))}</b> · {top_action.get('count')}")
     if top_city:
         lines.append(f"Топ-город: <b>{h(top_city.get('name'))}</b> · ур. {top_city.get('level')} · жители {top_city.get('population')}")
+    return "\n".join(lines)
+
+
+
+
+def render_admin_errors(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🧯 <b>Ошибки</b>\n\nЧисто."
+    lines = ["🧯 <b>Последние ошибки</b>", ""]
+    for item in items:
+        msg = str(item.get("message", ""))[:120]
+        lines.append(f"#{item['id']} · <b>{h(item['type'])}</b> · chat {h(item.get('chat_id'))}")
+        lines.append(f"└ {h(msg)}")
+    return "\n".join(lines)
+
+
+def render_admin_error(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "🧯 Ошибка не найдена."
+    trace = payload.get("traceback") or ""
+    short_trace = trace[-1200:] if trace else "—"
+    return (
+        f"🧯 <b>Ошибка #{payload['id']}</b>\n\n"
+        f"Тип: <b>{h(payload['type'])}</b>\n"
+        f"Источник: <b>{h(payload['source'])}</b>\n"
+        f"Chat: <code>{h(payload.get('chat_id'))}</code>\n"
+        f"User: <code>{h(payload.get('user_id'))}</code>\n"
+        f"Сообщение: {h(payload.get('message'))}\n\n"
+        f"<pre>{h(short_trace)}</pre>"
+    )
+
+
+def render_install_check(payload: dict[str, Any]) -> str:
+    lines = ["🛡 <b>Проверка города</b>", ""]
+    for item in payload.get("items", []):
+        mark = "✅" if item.get("ok") else "⚠️"
+        lines.append(f"{mark} {h(item['name'])}")
+    if payload.get("warnings"):
+        lines.append("")
+        for item in payload["warnings"]:
+            lines.append(f"⚠️ {h(item)}")
+    if not payload.get("warnings"):
+        lines.append("\n✅ Город готов.")
+    return "\n".join(lines)
+
+
+def render_production_audit(payload: dict[str, Any]) -> str:
+    city = payload["city"]
+    stage = payload.get("stage", {})
+    disabled = payload.get("disabled") or []
+    lines = [
+        "🧪 <b>Состояние района</b>",
+        "",
+        f"Город: <b>{h(city['name'])}</b>",
+        f"Стадия: <b>{h(stage.get('name', 'полный режим'))}</b>",
+        f"Автособытия: примерно раз в <b>{payload.get('auto_event_hours', 24)}</b> ч.",
+        f"Активных 24ч: <b>{payload.get('active_24h', 0)}</b>",
+        f"Действий 24ч: <b>{payload.get('actions_24h', 0)}</b>",
+        f"Ошибок 24ч: <b>{payload.get('errors_24h', 0)}</b>",
+    ]
+    if disabled:
+        lines.append("Отключено: " + ", ".join(h(item) for item in disabled))
     return "\n".join(lines)
 
 
@@ -1353,7 +1504,7 @@ async def send_city_panel(message: Message, created: bool = False, user: Any | N
         is_member, is_founder = is_member_payload(db, city, user)
     await send_game_message(message, 
         render_city_status(payload, created or was_created),
-        reply_markup=city_panel_keyboard(is_member=is_member, is_founder=is_founder),
+        reply_markup=city_panel_keyboard(is_member=is_member, is_founder=is_founder, payload=payload),
     )
 
 @router.message(CommandStart())
@@ -1460,6 +1611,22 @@ async def cmd_city(message: Message) -> None:
         await send_game_message(message, "Город доступен в группе.")
         return
     await send_city_panel(message, user=message.from_user)
+
+
+@router.message(Command("check"))
+async def cmd_check(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Проверка доступна в группе.")
+        return
+    await perform_install_check(message)
+
+
+@router.message(Command("audit"))
+async def cmd_audit(message: Message) -> None:
+    if not is_group(message):
+        await send_game_message(message, "Аудит доступен в группе.")
+        return
+    await perform_production_audit(message, message.from_user)
 
 
 @router.message(Command("join"))
@@ -1602,6 +1769,46 @@ async def cmd_alliances(message: Message) -> None:
 @router.message(Command("admin_stats"))
 async def cmd_admin_stats(message: Message) -> None:
     await perform_admin_stats(message)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message) -> None:
+    await perform_admin_panel(message)
+
+
+@router.message(Command("admin_growth"))
+async def cmd_admin_growth(message: Message) -> None:
+    await perform_admin_growth(message)
+
+
+@router.message(Command("admin_retention"))
+async def cmd_admin_retention(message: Message) -> None:
+    await perform_admin_retention(message)
+
+
+@router.message(Command("admin_payments"))
+async def cmd_admin_payments(message: Message) -> None:
+    await perform_admin_payments(message)
+
+
+@router.message(Command("admin_dead_chats"))
+async def cmd_admin_dead_chats(message: Message) -> None:
+    await perform_admin_dead_chats(message)
+
+
+@router.message(Command("admin_errors"))
+async def cmd_admin_errors(message: Message) -> None:
+    await perform_admin_errors(message)
+
+
+@router.message(Command("admin_error"))
+async def cmd_admin_error(message: Message, command: CommandObject) -> None:
+    await perform_admin_error(message, command.args or "")
+
+
+@router.message(Command("admin_clear_errors"))
+async def cmd_admin_clear_errors(message: Message, command: CommandObject) -> None:
+    await perform_admin_clear_errors(message, command.args or "")
 
 
 @router.message(Command("raids"))
@@ -2145,11 +2352,13 @@ async def perform_resetcity_confirm(message: Message, user: Any | None) -> None:
 
 async def perform_more(message: Message, user: Any | None = None) -> None:
     is_founder = False
-    if user and is_human_user(user):
-        with session_scope() as db:
-            city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+    payload = None
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = city_payload(db, city)
+        if user and is_human_user(user):
             _is_member, is_founder = is_member_payload(db, city, user)
-    await send_game_message(message, render_more_menu(), reply_markup=more_keyboard(is_founder=is_founder))
+    await send_game_message(message, render_more_menu(), reply_markup=more_keyboard(is_founder=is_founder, payload=payload))
 
 
 async def perform_daily(message: Message, user: Any | None) -> None:
@@ -2249,6 +2458,10 @@ async def perform_duel_command(message: Message, raw_args: str) -> None:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         if not is_mechanic_enabled(city, "duel"):
             await send_game_message(message, "⚔️ Дуэли в этом районе выключены.", reply_markup=back_keyboard())
+            return
+        reached, count, limit = daily_action_limit_reached(db, city, "duel_created")
+        if reached:
+            await send_game_message(message, f"⚔️ Дуэли на сегодня закончились: <b>{count}</b>/<b>{limit}</b>.", reply_markup=back_keyboard())
             return
         challenger, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
         join_city(db, city, challenger, is_chat_owner=owner)
@@ -2362,6 +2575,10 @@ async def perform_steal(message: Message, user: Any | None) -> None:
         if not is_mechanic_enabled(city, "steal"):
             await send_game_message(message, "💰 Кражи в этом районе выключены.", reply_markup=back_keyboard())
             return
+        reached, count, limit = daily_action_limit_reached(db, city, "steal")
+        if reached:
+            await send_game_message(message, f"💰 Кражи на сегодня закончились: <b>{count}</b>/<b>{limit}</b>.", reply_markup=back_keyboard())
+            return
         player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
         join_city(db, city, player, is_chat_owner=owner)
         ok, text = steal_treasury(db, city, player)
@@ -2380,6 +2597,10 @@ async def perform_revolt(message: Message, user: Any | None) -> None:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         if not is_mechanic_enabled(city, "revolt"):
             await send_game_message(message, "🔥 Бунты в этом районе выключены.", reply_markup=back_keyboard())
+            return
+        reached, count, limit = daily_action_limit_reached(db, city, "revolt")
+        if reached:
+            await send_game_message(message, f"🔥 Бунты на сегодня закончились: <b>{count}</b>/<b>{limit}</b>.", reply_markup=back_keyboard())
             return
         player, _, _ = get_or_create_player(db, user.id, user.username, user.first_name)
         join_city(db, city, player, is_chat_owner=owner)
@@ -2883,6 +3104,76 @@ async def perform_admin_dead_chats(message: Message) -> None:
 
 
 
+async def perform_admin_errors(message: Message) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    with session_scope() as db:
+        items = admin_errors_payload(db, limit=15)
+    await send_game_message(message, render_admin_errors(items), reply_markup=admin_keyboard())
+
+
+async def perform_admin_error(message: Message, raw_id: str) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    try:
+        error_id = int((raw_id or "").strip())
+    except ValueError:
+        await send_game_message(message, "🧯 ID не найден.", reply_markup=admin_keyboard())
+        return
+    with session_scope() as db:
+        payload = admin_error_payload(db, error_id)
+    await send_game_message(message, render_admin_error(payload), reply_markup=admin_keyboard())
+
+
+async def perform_admin_clear_errors(message: Message, raw_days: str) -> None:
+    if not is_admin(message.from_user.id if message.from_user else None):
+        await send_game_message(message, "Доступ закрыт.")
+        return
+    try:
+        days = int((raw_days or "14").strip())
+    except ValueError:
+        days = 14
+    with session_scope() as db:
+        count = admin_clear_errors(db, days=days)
+    await send_game_message(message, f"🧯 Удалено старых ошибок: <b>{count}</b>", reply_markup=admin_keyboard())
+
+
+async def perform_install_check(message: Message) -> None:
+    payload = {"items": [], "warnings": []}
+    try:
+        me = await message.bot.get_me()
+        member = await message.bot.get_chat_member(message.chat.id, me.id)
+        status = str(member.status)
+        is_admin_bot = status in {"administrator", "ChatMemberStatus.ADMINISTRATOR"} or status.endswith("administrator")
+        payload["items"].append({"name": "бот в чате", "ok": True})
+        payload["items"].append({"name": "админ-права", "ok": bool(is_admin_bot)})
+        can_delete = bool(getattr(member, "can_delete_messages", False))
+        can_pin = bool(getattr(member, "can_pin_messages", False))
+        payload["items"].append({"name": "удаление сообщений", "ok": can_delete})
+        payload["items"].append({"name": "закреп сообщений", "ok": can_pin})
+        if not is_admin_bot:
+            payload["warnings"].append("бот не админ")
+        if not can_pin:
+            payload["warnings"].append("нет закрепа")
+    except Exception as exc:
+        store_runtime_error("install_check", exc, chat_id=message.chat.id, user_id=message.from_user.id if message.from_user else None)
+        payload["items"].append({"name": "проверка прав", "ok": False})
+        payload["warnings"].append("проверка не прошла")
+    await send_game_message(message, render_install_check(payload), reply_markup=back_keyboard())
+
+
+async def perform_production_audit(message: Message, user: Any | None) -> None:
+    if not user or not await is_user_chat_owner(message.bot, message.chat.id, user.id):
+        await send_game_message(message, "🧪 Аудит доступен владельцу чата.", reply_markup=back_keyboard())
+        return
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
+        payload = production_audit_payload(db, city)
+    await send_game_message(message, render_production_audit(payload), reply_markup=back_keyboard())
+
+
 async def perform_logs(message: Message) -> None:
     with session_scope() as db:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
@@ -2929,6 +3220,10 @@ async def perform_court(message: Message) -> None:
         city, _ = get_or_create_city(db, message.chat.id, message.chat.title)
         if not is_mechanic_enabled(city, "court"):
             await send_game_message(message, "⚖️ Суды в этом районе выключены.", reply_markup=back_keyboard())
+            return
+        reached, count, limit = daily_action_limit_reached(db, city, "court")
+        if reached:
+            await send_game_message(message, f"⚖️ Суды на сегодня закончились: <b>{count}</b>/<b>{limit}</b>.", reply_markup=back_keyboard())
             return
         allowed, left = city_action_cooldown(db, city, "court", 30)
         if not allowed:
@@ -3332,7 +3627,10 @@ async def cb_move(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await delete_callback_message(callback)
-    await send_game_message(callback.message, render_move_menu(), reply_markup=move_keyboard())  # type: ignore[arg-type]
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, callback.message.chat.id, callback.message.chat.title)  # type: ignore[union-attr]
+        payload = city_payload(db, city)
+    await send_game_message(callback.message, render_move_menu(), reply_markup=move_keyboard(payload))  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data == "cc:war")
@@ -3342,7 +3640,10 @@ async def cb_war(callback: CallbackQuery) -> None:
         return
     await callback.answer()
     await delete_callback_message(callback)
-    await send_game_message(callback.message, render_war_menu(), reply_markup=war_keyboard())  # type: ignore[arg-type]
+    with session_scope() as db:
+        city, _ = get_or_create_city(db, callback.message.chat.id, callback.message.chat.title)  # type: ignore[union-attr]
+        payload = city_payload(db, city)
+    await send_game_message(callback.message, render_war_menu(), reply_markup=war_keyboard(payload))  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data == "cc:alliances")
@@ -3915,6 +4216,17 @@ async def cb_admin_dead_chats(callback: CallbackQuery) -> None:
     await perform_admin_dead_chats(callback.message)
 
 
+
+
+@router.callback_query(F.data == "cc:admin_errors")
+async def cb_admin_errors(callback: CallbackQuery) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    await callback.answer()
+    await perform_admin_errors(callback.message)
+
+
 @router.callback_query(F.data == "cc:global_top")
 async def cb_global_top(callback: CallbackQuery) -> None:
     if not isinstance(callback.message, Message):
@@ -4056,6 +4368,32 @@ async def auto_event_loop(bot: Bot) -> None:
         await asyncio.sleep(interval)
 
 
+
+@router.errors()
+async def on_router_error(event: ErrorEvent) -> bool:
+    exc = event.exception
+    chat_id = None
+    user_id = None
+    try:
+        update = event.update
+        msg = getattr(update, "message", None) or getattr(update, "callback_query", None)
+        if msg and getattr(msg, "message", None):
+            msg = msg.message
+        if msg and getattr(msg, "chat", None):
+            chat_id = msg.chat.id
+        callback = getattr(update, "callback_query", None)
+        if callback and getattr(callback, "from_user", None):
+            user_id = callback.from_user.id
+        elif msg and getattr(msg, "from_user", None):
+            user_id = msg.from_user.id
+        update_json = update.model_dump_json(exclude_none=True) if hasattr(update, "model_dump_json") else str(update)
+    except Exception:
+        update_json = None
+    store_runtime_error("router", exc, chat_id=chat_id, user_id=user_id, update_json=update_json)
+    logger.exception("Router error stored", exc_info=exc)
+    return True
+
+
 async def run_bot_polling() -> None:
     settings = get_settings()
     if not settings.has_bot_token:
@@ -4064,6 +4402,7 @@ async def run_bot_polling() -> None:
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.callback_query.middleware(CallbackThrottleMiddleware())
     dp.include_router(router)
     auto_task: asyncio.Task | None = None
 

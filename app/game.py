@@ -15,7 +15,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, CityStatus, Duel, DuelStatus, Membership, Player, Purchase, PurchaseStatus, War, utcnow
+from app.models import ActionLog, AllianceStatus, City, CityAlliance, CityEvent, CityReferral, CityStatus, Duel, DuelStatus, ErrorLog, Membership, Player, Purchase, PurchaseStatus, War, utcnow
 
 CITY_PREFIXES = [
     "Неоновый", "Шумный", "Подпольный", "Кибер", "Бешеный", "Сонный", "Золотой", "Пиксельный",
@@ -266,6 +266,18 @@ CITY_LEAGUES = [
     (100, "🥇 Городская лига"),
     (500, "👑 Имперская лига"),
 ]
+
+CITY_STAGE_MINIMAL_MAX = 4
+CITY_STAGE_GROWING_MAX = 14
+
+BUTTON_COOLDOWN_SECONDS = 2
+NOISY_ACTION_DAILY_LIMITS: dict[str, int] = {
+    "court": 6,
+    "steal": 18,
+    "duel_created": 24,
+    "revolt": 8,
+    "rumor": 8,
+}
 
 LEGENDARY_EVENTS = [
     "👑 В районе нашли древнюю корону. Никто не понял, чья она, но спорят все.",
@@ -1400,7 +1412,11 @@ def create_smart_city_event(db: Session, city: City) -> CityEvent | None:
 def create_new_event_if_due(db: Session, city: City) -> CityEvent | None:
     if get_active_event(db, city):
         return None
-    if not auto_event_due(city):
+    if city.status != CityStatus.ACTIVE.value:
+        return None
+    last_event = _aware(city.last_event_at)
+    hours = effective_auto_event_hours(db, city)
+    if last_event and utcnow() < last_event + timedelta(hours=hours):
         return None
     return create_smart_city_event(db, city)
 
@@ -1936,6 +1952,7 @@ def admin_stats(db: Session) -> dict[str, Any]:
     feedback_day = db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "feedback", ActionLog.created_at >= since_day)) or 0
     stars_purchases_day = db.scalar(select(func.count(Purchase.id)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
     stars_total_day = db.scalar(select(func.coalesce(func.sum(Purchase.stars_amount), 0)).where(Purchase.status == PurchaseStatus.PAID.value, Purchase.created_at >= since_day)) or 0
+    errors_day = db.scalar(select(func.count(ErrorLog.id)).where(ErrorLog.created_at >= since_day)) or 0
     action_count = func.count(ActionLog.id)
     top_action_row = db.execute(
         select(ActionLog.action, action_count.label("n"))
@@ -1963,6 +1980,7 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "feedback_day": int(feedback_day),
         "stars_purchases_day": int(stars_purchases_day),
         "stars_total_day": int(stars_total_day or 0),
+        "errors_day": int(errors_day or 0),
         "top_action": {"action": top_action_row[0], "count": int(top_action_row[1])} if top_action_row else None,
         "top_city": top_city[0] if top_city else None,
     }
@@ -3126,6 +3144,7 @@ def set_city_activity_mode(db: Session, city: City, mode: str) -> tuple[bool, st
 def auto_event_due(city: City) -> bool:
     if city.status != CityStatus.ACTIVE.value:
         return False
+    # Base check for simple callers. create_new_event_if_due uses the DB-aware quiet autopilot.
     mode = city.activity_mode if city.activity_mode in ACTIVITY_MODES else "normal"
     hours = int(ACTIVITY_MODES[mode]["hours"])
     last_event = _aware(city.last_event_at)
@@ -3739,6 +3758,183 @@ def weekly_digest_payload(db: Session, city: City) -> dict[str, Any]:
         "top": top,
         "referrals": city_referral_count(db, city.id),
         "trophies": get_city_trophies(city),
+    }
+
+
+
+def log_error(
+    db: Session,
+    source: str,
+    error: BaseException | str,
+    traceback_text: str | None = None,
+    chat_id: int | None = None,
+    user_id: int | None = None,
+    update_json: str | None = None,
+) -> ErrorLog:
+    if isinstance(error, BaseException):
+        error_type = error.__class__.__name__
+        message = str(error) or error_type
+    else:
+        error_type = "Error"
+        message = str(error)
+    item = ErrorLog(
+        source=str(source or "bot")[:80],
+        error_type=error_type[:160],
+        message=message[:4000],
+        traceback_text=(traceback_text or "")[:12000] or None,
+        chat_id=chat_id,
+        user_id=user_id,
+        update_json=(update_json or "")[:12000] or None,
+    )
+    db.add(item)
+    db.flush()
+    return item
+
+
+def admin_errors_payload(db: Session, limit: int = 15) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(ErrorLog)
+        .order_by(desc(ErrorLog.created_at))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": item.id,
+            "source": item.source,
+            "type": item.error_type,
+            "message": item.message,
+            "chat_id": item.chat_id,
+            "user_id": item.user_id,
+            "resolved": bool(item.resolved),
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+def admin_error_payload(db: Session, error_id: int) -> dict[str, Any] | None:
+    item = db.get(ErrorLog, int(error_id))
+    if not item:
+        return None
+    return {
+        "id": item.id,
+        "source": item.source,
+        "type": item.error_type,
+        "message": item.message,
+        "traceback": item.traceback_text or "",
+        "chat_id": item.chat_id,
+        "user_id": item.user_id,
+        "update_json": item.update_json or "",
+        "resolved": bool(item.resolved),
+        "created_at": item.created_at.isoformat(),
+    }
+
+
+def admin_clear_errors(db: Session, days: int = 14) -> int:
+    cutoff = utcnow() - timedelta(days=max(1, int(days or 14)))
+    rows = db.scalars(select(ErrorLog).where(ErrorLog.created_at < cutoff)).all()
+    count = len(rows)
+    for item in rows:
+        db.delete(item)
+    db.flush()
+    return count
+
+
+def error_count(db: Session, since_hours: int = 24) -> int:
+    since = utcnow() - timedelta(hours=since_hours)
+    return int(db.scalar(select(func.count(ErrorLog.id)).where(ErrorLog.created_at >= since)) or 0)
+
+
+def city_stage(db: Session, city: City) -> str:
+    population = city_population(db, city.id)
+    if population <= CITY_STAGE_MINIMAL_MAX:
+        return "new"
+    if population <= CITY_STAGE_GROWING_MAX:
+        return "growing"
+    return "full"
+
+
+def city_stage_payload(db: Session, city: City) -> dict[str, Any]:
+    stage = city_stage(db, city)
+    names = {
+        "new": "новый район",
+        "growing": "растущий район",
+        "full": "полный режим",
+    }
+    return {"key": stage, "name": names.get(stage, "полный режим"), "population": city_population(db, city.id)}
+
+
+def effective_auto_event_hours(db: Session, city: City) -> int:
+    base = int(ACTIVITY_MODES.get(city.activity_mode, ACTIVITY_MODES["normal"])["hours"])
+    population = city_population(db, city.id)
+    actions_24h = db.scalar(
+        select(func.count(ActionLog.id))
+        .where(ActionLog.city_id == city.id, ActionLog.created_at >= utcnow() - timedelta(days=1))
+    ) or 0
+    disabled_count = len(get_city_settings(city).get("disabled", []))
+    if population < 5 or actions_24h < 5:
+        base = max(base, 24)
+    if disabled_count >= 3:
+        base = max(base, 30)
+    if actions_24h >= 80 and population >= 15:
+        base = max(6, min(base, 12))
+    return int(base)
+
+
+def button_rate_limited(db: Session, chat_id: int, telegram_user_id: int, action: str, seconds: int = BUTTON_COOLDOWN_SECONDS) -> tuple[bool, int]:
+    city, _ = get_or_create_city(db, chat_id, "Chat")
+    player, _, _ = get_or_create_player(db, telegram_user_id, None, "Игрок")
+    since = utcnow() - timedelta(seconds=max(1, seconds))
+    row = db.scalar(
+        select(ActionLog)
+        .where(
+            ActionLog.city_id == city.id,
+            ActionLog.player_id == player.id,
+            ActionLog.action == action,
+            ActionLog.created_at >= since,
+        )
+        .order_by(desc(ActionLog.created_at))
+        .limit(1)
+    )
+    if row:
+        created = _aware(row.created_at) or utcnow()
+        left = int(((created + timedelta(seconds=seconds)) - utcnow()).total_seconds()) + 1
+        return True, max(1, left)
+    log(db, city.id, player.id, action, "callback")
+    db.flush()
+    return False, 0
+
+
+def daily_action_limit_reached(db: Session, city: City, action: str) -> tuple[bool, int, int]:
+    limit = NOISY_ACTION_DAILY_LIMITS.get(action)
+    if not limit:
+        return False, 0, 0
+    since = utcnow() - timedelta(days=1)
+    count = int(db.scalar(
+        select(func.count(ActionLog.id))
+        .where(ActionLog.city_id == city.id, ActionLog.action == action, ActionLog.created_at >= since)
+    ) or 0)
+    return count >= limit, count, limit
+
+
+def production_audit_payload(db: Session, city: City) -> dict[str, Any]:
+    settings = get_city_settings(city)
+    active_24h = int(db.scalar(
+        select(func.count(func.distinct(ActionLog.player_id)))
+        .where(ActionLog.city_id == city.id, ActionLog.player_id.is_not(None), ActionLog.created_at >= utcnow() - timedelta(days=1))
+    ) or 0)
+    actions_24h = int(db.scalar(
+        select(func.count(ActionLog.id))
+        .where(ActionLog.city_id == city.id, ActionLog.created_at >= utcnow() - timedelta(days=1))
+    ) or 0)
+    return {
+        "city": city_payload(db, city),
+        "stage": city_stage_payload(db, city),
+        "auto_event_hours": effective_auto_event_hours(db, city),
+        "disabled": settings.get("disabled", []),
+        "active_24h": active_24h,
+        "actions_24h": actions_24h,
+        "errors_24h": error_count(db, 24),
     }
 
 

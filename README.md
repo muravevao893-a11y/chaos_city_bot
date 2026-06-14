@@ -566,3 +566,16 @@ STARS_ENABLED=true
 /admin_payments     - платежи Stars
 /admin_dead_chats   - тихие чаты
 ```
+
+
+## Новые команды v1.8
+
+```text
+/check                 - проверка прав бота в чате
+/audit                 - состояние района для владельца
+/admin_errors          - последние ошибки
+/admin_error ID        - карточка ошибки
+/admin_clear_errors    - очистить старые ошибки
+```
+
+`/check` лучше выполнить после добавления бота в новый чат.
